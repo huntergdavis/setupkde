@@ -3,15 +3,21 @@
 # setup-kde.sh — rebuild Hunter's KDE app environment on a fresh machine.
 #
 # Installs the programs and creates the KDE menu icons for:
-#   HEY, HEY Journal, Newsboat, ortop, fresh-editor
+#   HEY, HEY Journal, Newsboat, ortop, Media Editor, fresh-editor
 # plus the other apps installed by hand (duckstation, claude-desktop,
 # rustdesk, crystal-dock, firefox/thunderbird/bottom snaps).
+#
+# It also makes fresh-editor the system-wide default editor (EDITOR/VISUAL
+# and the `editor` alternative) via a wrapper, so git/crontab/hey all use it.
 #
 # This script does NOT copy keys, tokens, logins, or config secrets.
 # After running it you still need to provide, yourself:
 #   - ~/.config/ortop/env        (OpenRouter API keys; sourced by ortop-gui)
 #   - HEY login / `hey` config
 #   - newsboat ~/.config/newsboat/urls (FreshRSS aggregator + creds)
+#
+# The Media Editor repo is private; cloning it needs your SSH key set up
+# with GitHub (the clone URL is git@github.com:huntergdavis/media.git).
 #
 # Safe to re-run: every step checks whether the work is already done.
 #
@@ -21,12 +27,18 @@ set -euo pipefail
 # Config
 # ---------------------------------------------------------------------------
 BUILD_DIR="${BUILD_DIR:-$HOME/src}"          # where upstream repos are cloned/built
+WORKSPACE_DIR="${WORKSPACE_DIR:-$HOME/workspace}"  # where personal project repos live
 LOCAL_BIN="$HOME/.local/bin"
 APPS_DIR="$HOME/.local/share/applications"
 
 HEY_REPO="https://github.com/basecamp/hey-cli.git"
 ORTOP_REPO="https://github.com/huntergdavis/openrouter-tui.git"
 NEWSBOAT_REPO="https://github.com/newsboat/newsboat.git"
+MEDIA_REPO="git@github.com:huntergdavis/media.git"   # private; needs your GitHub SSH key
+MEDIA_DIR="$WORKSPACE_DIR/media"
+
+# Path of the fresh-editor wrapper that fixes snap's argv[0] dispatch (see below).
+FRESH_WRAPPER="/usr/local/bin/fresh"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -48,7 +60,7 @@ clone_or_update() {
   fi
 }
 
-mkdir -p "$BUILD_DIR" "$LOCAL_BIN" "$APPS_DIR"
+mkdir -p "$BUILD_DIR" "$WORKSPACE_DIR" "$LOCAL_BIN" "$APPS_DIR"
 
 # ---------------------------------------------------------------------------
 # 1. apt build dependencies + toolchains
@@ -61,6 +73,7 @@ install_build_deps() {
     cargo rustc golang-go gettext asciidoctor \
     libstfl-dev libsqlite3-dev libcurl4-openssl-dev \
     libncurses-dev libxml2-dev \
+    python3 python3-venv \
     konsole snapd
 }
 
@@ -92,6 +105,36 @@ build_newsboat() {
   ( cd "$dir" && make -j"$(nproc)" && sudo make install )   # installs under /usr/local
 }
 
+# Media Editor: a personal Textual TUI for editing markdown collection tables.
+# Cloned to ~/workspace (not ~/src) because the markdown files it edits live
+# in the repo. Self-bootstraps a venv via run-tui.sh; we pre-warm it here.
+install_media() {
+  say "Installing Media Editor (media) -> $MEDIA_DIR"
+  if [ -d "$MEDIA_DIR/.git" ]; then
+    info "updating media"
+    git -C "$MEDIA_DIR" pull --ff-only --quiet || warn "could not fast-forward $MEDIA_DIR; using current checkout"
+  else
+    info "cloning media (needs your GitHub SSH key)"
+    if ! git clone "$MEDIA_REPO" "$MEDIA_DIR"; then
+      warn "could not clone $MEDIA_REPO — set up your GitHub SSH key, then re-run. Skipping Media Editor."
+      return 0
+    fi
+  fi
+  chmod 0755 "$MEDIA_DIR/run-tui.sh" 2>/dev/null || true
+
+  # Pre-build the Textual venv so the first menu launch is instant.
+  if [ ! -d "$MEDIA_DIR/media_editor_env" ]; then
+    info "creating media_editor_env venv"
+    if python3 -m venv "$MEDIA_DIR/media_editor_env"; then
+      "$MEDIA_DIR/media_editor_env/bin/pip" install --quiet --upgrade pip
+      "$MEDIA_DIR/media_editor_env/bin/pip" install --quiet -r "$MEDIA_DIR/requirements.txt"
+    else
+      rm -rf "$MEDIA_DIR/media_editor_env"
+      warn "venv creation failed; run-tui.sh will retry on first launch"
+    fi
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # 3. Snaps: fresh-editor, duckstation, and the rest
 # ---------------------------------------------------------------------------
@@ -111,6 +154,38 @@ install_snaps() {
   snap_install firefox
   snap_install thunderbird
   snap_install bottom
+}
+
+# ---------------------------------------------------------------------------
+# 3b. Make fresh-editor the system-wide default editor
+# ---------------------------------------------------------------------------
+# /snap/bin/fresh-editor symlinks to /usr/bin/snap, and snap chooses which app
+# to run from the basename it's invoked as. Tools that call the editor as
+# "editor" (git, crontab) would therefore run snap *as* "editor" and fail with
+# `unknown command ...`. A tiny wrapper that always re-execs fresh-editor under
+# its real name fixes this; we point EDITOR/VISUAL and the `editor` alternative
+# at the wrapper.
+set_default_editor() {
+  say "Making fresh-editor the system-wide default editor"
+
+  sudo tee "$FRESH_WRAPPER" >/dev/null <<'EOF'
+#!/bin/sh
+# Wrapper for the fresh-editor snap.
+# Snap dispatches by argv[0] basename, so it must be invoked as "fresh-editor".
+# Tools that call it as "editor" (git, crontab, etc.) break without this.
+exec /snap/bin/fresh-editor "$@"
+EOF
+  sudo chmod 0755 "$FRESH_WRAPPER"
+
+  # `editor` alternative (used by sensible-editor and as git's last-resort editor).
+  sudo update-alternatives --install /usr/bin/editor editor "$FRESH_WRAPPER" 200
+  sudo update-alternatives --set editor "$FRESH_WRAPPER"
+
+  # EDITOR/VISUAL for all login + GUI sessions (pam_env reads /etc/environment).
+  # Idempotent: strip any prior lines first. Takes effect on next login.
+  sudo sed -i '/^EDITOR=/d;/^VISUAL=/d' /etc/environment
+  printf 'EDITOR="%s"\nVISUAL="%s"\n' "$FRESH_WRAPPER" "$FRESH_WRAPPER" | sudo tee -a /etc/environment >/dev/null
+  info "EDITOR/VISUAL -> $FRESH_WRAPPER (takes effect on next login)"
 }
 
 # ---------------------------------------------------------------------------
@@ -173,7 +248,7 @@ install_wrappers() {
 # Launcher wrapper for the "HEY Journal" KDE menu entry.
 # `hey journal write` opens $EDITOR; GUI launches don't always have it set,
 # so guarantee fresh-editor is used (falls back to any EDITOR already set).
-export EDITOR="${EDITOR:-/snap/bin/fresh-editor}"
+export EDITOR="${EDITOR:-/usr/local/bin/fresh}"
 export VISUAL="${VISUAL:-$EDITOR}"
 exec hey journal write "$@"
 EOF
@@ -266,6 +341,28 @@ X-KDE-Username=
 EOF
 
   chmod 0644 "$APPS_DIR"/{hey,hey-journal,newsboat,ortop}.desktop
+
+  # Media Editor — only wire it up if the repo actually cloned.
+  if [ -f "$MEDIA_DIR/run-tui.sh" ]; then
+    cat > "$APPS_DIR/media-tui.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Media Editor
+GenericName=Physical Media Editor
+Comment=TUI for editing your markdown media collection tables
+Exec=konsole -p tabtitle=Media -e $MEDIA_DIR/run-tui.sh
+Icon=text-x-markdown
+Terminal=false
+Categories=Office;Database;
+Keywords=media;markdown;movies;cds;vinyl;games;collection;editor;
+StartupNotify=true
+EOF
+    chmod 0644 "$APPS_DIR/media-tui.desktop"
+  else
+    warn "skipping Media Editor menu icon (media repo not present at $MEDIA_DIR)"
+  fi
+
   if have update-desktop-database; then
     update-desktop-database "$APPS_DIR" 2>/dev/null || true
   fi
@@ -280,8 +377,10 @@ main() {
   build_hey
   build_ortop
   build_newsboat
+  install_media
 
   install_snaps
+  set_default_editor
   install_crystal_dock
   install_claude_desktop
   install_rustdesk
@@ -292,11 +391,13 @@ main() {
   say "Done."
   cat <<EOF
 
-Menu icons created: HEY, HEY Journal, Newsboat, ortop.
+Menu icons created: HEY, HEY Journal, Newsboat, ortop, Media Editor.
+fresh-editor is now the system-wide default editor (effective next login).
 Still up to you (secrets — intentionally not handled here):
   - ~/.config/ortop/env   OpenRouter API keys
   - HEY login             run: hey   (and sign in)
   - ~/.config/newsboat/urls   your FreshRSS endpoint + credentials
+  - GitHub SSH key        needed to clone the private media repo
 EOF
 }
 
