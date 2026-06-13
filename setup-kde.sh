@@ -115,6 +115,14 @@ install_media() {
     git -C "$MEDIA_DIR" pull --ff-only --quiet || warn "could not fast-forward $MEDIA_DIR; using current checkout"
   else
     info "cloning media (needs your GitHub SSH key)"
+    # Pre-trust github.com's host key so the SSH clone doesn't prompt (or fail
+    # non-interactively) on a fresh machine. Idempotent: only add if missing.
+    mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
+    touch "$HOME/.ssh/known_hosts"
+    if ! ssh-keygen -F github.com >/dev/null 2>&1; then
+      ssh-keyscan -t rsa,ecdsa,ed25519 github.com >> "$HOME/.ssh/known_hosts" 2>/dev/null \
+        || warn "could not pre-fetch github.com host key (ssh-keyscan failed)"
+    fi
     if ! git clone "$MEDIA_REPO" "$MEDIA_DIR"; then
       warn "could not clone $MEDIA_REPO — set up your GitHub SSH key, then re-run. Skipping Media Editor."
       return 0
