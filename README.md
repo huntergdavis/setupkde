@@ -13,7 +13,7 @@ Safe to re-run — every step is idempotent.
 ## What it does
 
 **Menu icons** (`~/.local/share/applications/`): HEY, HEY Journal, Newsboat,
-ortop, Media Editor.
+ortop, Media Editor, Dunking Bird.
 
 **Programs:**
 
@@ -23,6 +23,7 @@ ortop, Media Editor.
 | `ortop` | built from `huntergdavis/openrouter-tui` → `~/.local/bin/ortop` |
 | `newsboat` | built from source → `/usr/local/bin/newsboat` |
 | Media Editor | cloned from `huntergdavis/media` (SSH) → `~/workspace/media` |
+| Dunking Bird | cloned from `huntergdavis/dunkingbird` → `~/workspace/dunkingbird` |
 | fresh-editor | snap (classic) — also set as the system-wide default editor |
 | duckstation | snap `duckstation-gpl` |
 | firefox, thunderbird, bottom | snaps |
@@ -34,6 +35,12 @@ ortop, Media Editor.
 `VISUAL`, and the `editor` alternative). Because fresh-editor is a snap that
 dispatches on its invocation name, a wrapper at `/usr/local/bin/fresh` re-execs
 it under the right name so `git`, `crontab`, etc. work. Effective next login.
+
+**Dunking Bird** types into the active window via `ydotool`, so the installer
+also pulls in `ydotool`/`xclip`/`xdotool`, adds you to the `input` group
+(re-login required), and on KDE Wayland installs `kdotool` for window
+targeting. Its menu icon runs the repo's own `run_dunking_bird.sh`, which
+starts the ydotool daemon and the TUI.
 
 Wrapper scripts `~/.local/bin/hey-journal` and `~/.local/bin/ortop-gui` are
 recreated too.

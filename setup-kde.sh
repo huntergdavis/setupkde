@@ -3,7 +3,7 @@
 # setup-kde.sh — rebuild Hunter's KDE app environment on a fresh machine.
 #
 # Installs the programs and creates the KDE menu icons for:
-#   HEY, HEY Journal, Newsboat, ortop, Media Editor, fresh-editor
+#   HEY, HEY Journal, Newsboat, ortop, Media Editor, Dunking Bird, fresh-editor
 # plus the other apps installed by hand (duckstation, claude-desktop,
 # rustdesk, crystal-dock, firefox/thunderbird/bottom snaps).
 #
@@ -36,6 +36,8 @@ ORTOP_REPO="https://github.com/huntergdavis/openrouter-tui.git"
 NEWSBOAT_REPO="https://github.com/newsboat/newsboat.git"
 MEDIA_REPO="git@github.com:huntergdavis/media.git"   # private; needs your GitHub SSH key
 MEDIA_DIR="$WORKSPACE_DIR/media"
+DUNKING_REPO="https://github.com/huntergdavis/dunkingbird.git"   # public
+DUNKING_DIR="$WORKSPACE_DIR/dunkingbird"
 
 # Path of the fresh-editor wrapper that fixes snap's argv[0] dispatch (see below).
 FRESH_WRAPPER="/usr/local/bin/fresh"
@@ -72,8 +74,9 @@ install_build_deps() {
     build-essential pkg-config git curl ca-certificates gnupg \
     cargo rustc golang-go gettext asciidoctor \
     libstfl-dev libsqlite3-dev libcurl4-openssl-dev \
-    libncurses-dev libxml2-dev \
-    python3 python3-venv \
+    libncurses-dev libxml2-dev libdbus-1-dev \
+    python3 python3-venv python3-pip \
+    ydotool xclip xdotool \
     konsole snapd
 }
 
@@ -140,6 +143,44 @@ install_media() {
       rm -rf "$MEDIA_DIR/media_editor_env"
       warn "venv creation failed; run-tui.sh will retry on first launch"
     fi
+  fi
+}
+
+# Dunking Bird: a personal Textual/curses TUI that types a prompt into the
+# active window every X seconds (drives input via ydotool). Public repo.
+# The menu icon launches its own run_dunking_bird.sh, which starts the ydotool
+# daemon and the TUI; the apt step above provides ydotool/xclip/xdotool so the
+# launcher's prerequisite checks pass on a fresh machine.
+install_dunkingbird() {
+  say "Installing Dunking Bird (dunkingbird) -> $DUNKING_DIR"
+  clone_or_update "$DUNKING_REPO" "$DUNKING_DIR"
+  chmod 0755 "$DUNKING_DIR/run_dunking_bird.sh" 2>/dev/null || true
+
+  # Pre-build the venv the launcher activates if present (requirements.txt has
+  # no hard pip deps, but this keeps the launcher's venv path working).
+  if [ ! -d "$DUNKING_DIR/venv" ]; then
+    info "creating venv"
+    if python3 -m venv "$DUNKING_DIR/venv"; then
+      "$DUNKING_DIR/venv/bin/pip" install --quiet --upgrade pip
+      "$DUNKING_DIR/venv/bin/pip" install --quiet -r "$DUNKING_DIR/requirements.txt" || true
+    else
+      rm -rf "$DUNKING_DIR/venv"
+      warn "venv creation failed; the launcher will run without it"
+    fi
+  fi
+
+  # ydotool needs the invoking user in the `input` group (re-login to apply).
+  # The launcher starts ydotoold itself (via sudo) at run time.
+  if ! id -nG "$USER" | tr ' ' '\n' | grep -qx input; then
+    info "adding $USER to the input group (for ydotool; re-login to take effect)"
+    sudo usermod -aG input "$USER" || warn "could not add $USER to the input group"
+  fi
+
+  # kdotool: window capture/focus backend used on KDE Wayland (best-effort).
+  if [ "${XDG_SESSION_TYPE:-}" = "wayland" ] && ! have kdotool; then
+    info "installing kdotool (KDE Wayland window backend)"
+    cargo install --git https://github.com/jinliu/kdotool --root "$HOME/.local" \
+      || warn "could not install kdotool; window targeting may be limited on KDE Wayland"
   fi
 }
 
@@ -371,6 +412,28 @@ EOF
     warn "skipping Media Editor menu icon (media repo not present at $MEDIA_DIR)"
   fi
 
+  # Dunking Bird — launches its own run_dunking_bird.sh (which checks prereqs);
+  # uses the icon bundled in the repo. Only wire up if the repo cloned.
+  if [ -f "$DUNKING_DIR/run_dunking_bird.sh" ]; then
+    cat > "$APPS_DIR/dunkingbird.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Dunking Bird
+GenericName=Auto Prompt Sender
+Comment=Type a prompt into the active window every X interval
+Exec=konsole --hold -p tabtitle=DunkingBird -e $DUNKING_DIR/run_dunking_bird.sh
+Icon=$DUNKING_DIR/dunkingbird.png
+Terminal=false
+Categories=Utility;
+Keywords=dunking;bird;prompt;automation;ydotool;agent;
+StartupNotify=true
+EOF
+    chmod 0644 "$APPS_DIR/dunkingbird.desktop"
+  else
+    warn "skipping Dunking Bird menu icon (repo not present at $DUNKING_DIR)"
+  fi
+
   if have update-desktop-database; then
     update-desktop-database "$APPS_DIR" 2>/dev/null || true
   fi
@@ -386,6 +449,7 @@ main() {
   build_ortop
   build_newsboat
   install_media
+  install_dunkingbird
 
   install_snaps
   set_default_editor
@@ -399,8 +463,9 @@ main() {
   say "Done."
   cat <<EOF
 
-Menu icons created: HEY, HEY Journal, Newsboat, ortop, Media Editor.
+Menu icons created: HEY, HEY Journal, Newsboat, ortop, Media Editor, Dunking Bird.
 fresh-editor is now the system-wide default editor (effective next login).
+Dunking Bird needs the 'input' group for ydotool — re-login if it was just added.
 Still up to you (secrets — intentionally not handled here):
   - ~/.config/ortop/env   OpenRouter API keys
   - HEY login             run: hey   (and sign in)
