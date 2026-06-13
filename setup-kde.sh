@@ -3,7 +3,8 @@
 # setup-kde.sh — rebuild Hunter's KDE app environment on a fresh machine.
 #
 # Installs the programs and creates the KDE menu icons for:
-#   HEY, HEY Journal, Newsboat, ortop, Media Editor, Dunking Bird, fresh-editor
+#   HEY, HEY Journal, Newsboat, ortop, Media Editor, Dunking Bird,
+#   qBittorrent TUI, fresh-editor
 # plus the other apps installed by hand (duckstation, claude-desktop,
 # rustdesk, crystal-dock, firefox/thunderbird/bottom snaps).
 #
@@ -13,6 +14,7 @@
 # This script does NOT copy keys, tokens, logins, or config secrets.
 # After running it you still need to provide, yourself:
 #   - ~/.config/ortop/env        (OpenRouter API keys; sourced by ortop-gui)
+#   - ~/.config/qbt-tui/env      (qBittorrent WebUI creds; sourced by qbt-tui-gui)
 #   - HEY login / `hey` config
 #   - newsboat ~/.config/newsboat/urls (FreshRSS aggregator + creds)
 #
@@ -26,6 +28,7 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"  # this repo (ships the qbt icon)
 BUILD_DIR="${BUILD_DIR:-$HOME/src}"          # where upstream repos are cloned/built
 WORKSPACE_DIR="${WORKSPACE_DIR:-$HOME/workspace}"  # where personal project repos live
 LOCAL_BIN="$HOME/.local/bin"
@@ -34,6 +37,7 @@ APPS_DIR="$HOME/.local/share/applications"
 HEY_REPO="https://github.com/basecamp/hey-cli.git"
 ORTOP_REPO="https://github.com/huntergdavis/openrouter-tui.git"
 NEWSBOAT_REPO="https://github.com/newsboat/newsboat.git"
+QBT_TUI_REPO="https://github.com/nickvanw/qbittorrent-tui.git"   # public
 MEDIA_REPO="git@github.com:huntergdavis/media.git"   # private; needs your GitHub SSH key
 MEDIA_DIR="$WORKSPACE_DIR/media"
 DUNKING_REPO="https://github.com/huntergdavis/dunkingbird.git"   # public
@@ -99,6 +103,18 @@ build_ortop() {
   clone_or_update "$ORTOP_REPO" "$dir"
   ( cd "$dir" && go build -o ortop ./... )
   install -m 0755 "$dir/ortop" "$LOCAL_BIN/ortop"
+}
+
+# qBittorrent TUI: a Bubble Tea terminal client for the qBittorrent WebUI API.
+# Connects to a remote instance, so no torrent daemon is installed here — just
+# the client. The menu icon launches qbt-tui-gui, which bakes in the WebUI URL
+# and sources credentials from ~/.config/qbt-tui/env (see install_wrappers).
+build_qbt_tui() {
+  say "Building qBittorrent TUI (qbt-tui) -> $LOCAL_BIN/qbt-tui"
+  local dir="$BUILD_DIR/qbittorrent-tui"
+  clone_or_update "$QBT_TUI_REPO" "$dir"
+  ( cd "$dir" && go build -o qbt-tui ./cmd/qbt-tui )
+  install -m 0755 "$dir/qbt-tui" "$LOCAL_BIN/qbt-tui"
 }
 
 build_newsboat() {
@@ -310,9 +326,34 @@ EOF
 exec ortop "$@"
 EOF
 
-  chmod 0755 "$LOCAL_BIN/hey-journal" "$LOCAL_BIN/ortop-gui"
+  cat > "$LOCAL_BIN/qbt-tui-gui" <<'EOF'
+#!/usr/bin/env bash
+# Launcher wrapper for the qbt-tui KDE menu entry.
+# GUI launches don't source ~/.bashrc, so set the (non-secret) server URL here
+# and load the qBittorrent WebUI credentials from a separate env file.
+export QBT_SERVER_URL="${QBT_SERVER_URL:-http://192.168.0.238:9999/}"
+. "$HOME/.config/qbt-tui/env" 2>/dev/null
+exec qbt-tui "$@"
+EOF
+
+  chmod 0755 "$LOCAL_BIN/hey-journal" "$LOCAL_BIN/ortop-gui" "$LOCAL_BIN/qbt-tui-gui"
   if [ ! -f "$HOME/.config/ortop/env" ]; then
     warn "ortop needs ~/.config/ortop/env with your OpenRouter keys (not created by this script)"
+  fi
+
+  # Seed a credentials stub for qbt-tui (URL is in the wrapper; creds are yours).
+  mkdir -p "$HOME/.config/qbt-tui"
+  if [ ! -f "$HOME/.config/qbt-tui/env" ]; then
+    cat > "$HOME/.config/qbt-tui/env" <<'EOF'
+# qBittorrent WebUI credentials for qbt-tui (sourced by qbt-tui-gui).
+# Server URL is set by the wrapper; fill in EITHER username+password
+# OR an api_key (qBittorrent 5.2.0+) below — not both.
+export QBT_SERVER_USERNAME="admin"
+export QBT_SERVER_PASSWORD=""
+# export QBT_SERVER_API_KEY="qbt_xxxxxxxxxxxxxxxxxxxxxxxx"
+EOF
+    chmod 0600 "$HOME/.config/qbt-tui/env"
+    warn "qbt-tui needs WebUI creds in ~/.config/qbt-tui/env (stub created; fill it in)"
   fi
 }
 
@@ -389,7 +430,22 @@ X-KDE-SubstituteUID=false
 X-KDE-Username=
 EOF
 
-  chmod 0644 "$APPS_DIR"/{hey,hey-journal,newsboat,ortop}.desktop
+  cat > "$APPS_DIR/qbt-tui.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=qBittorrent TUI
+GenericName=Torrent Manager
+Comment=Terminal UI for the qBittorrent WebUI at 192.168.0.238:9999
+Exec=konsole -p tabtitle=qBittorrent -e $LOCAL_BIN/qbt-tui-gui
+Icon=$SCRIPT_DIR/qbittorrent.svg
+Terminal=false
+Categories=Network;P2P;FileTransfer;
+Keywords=qbittorrent;torrent;bittorrent;download;tui;qbt;
+StartupNotify=true
+EOF
+
+  chmod 0644 "$APPS_DIR"/{hey,hey-journal,newsboat,ortop,qbt-tui}.desktop
 
   # Media Editor — only wire it up if the repo actually cloned.
   if [ -f "$MEDIA_DIR/run-tui.sh" ]; then
@@ -447,6 +503,7 @@ main() {
 
   build_hey
   build_ortop
+  build_qbt_tui
   build_newsboat
   install_media
   install_dunkingbird
@@ -463,11 +520,13 @@ main() {
   say "Done."
   cat <<EOF
 
-Menu icons created: HEY, HEY Journal, Newsboat, ortop, Media Editor, Dunking Bird.
+Menu icons created: HEY, HEY Journal, Newsboat, ortop, Media Editor, Dunking Bird,
+qBittorrent TUI.
 fresh-editor is now the system-wide default editor (effective next login).
 Dunking Bird needs the 'input' group for ydotool — re-login if it was just added.
 Still up to you (secrets — intentionally not handled here):
   - ~/.config/ortop/env   OpenRouter API keys
+  - ~/.config/qbt-tui/env qBittorrent WebUI username+password (or api_key)
   - HEY login             run: hey   (and sign in)
   - ~/.config/newsboat/urls   your FreshRSS endpoint + credentials
   - GitHub SSH key        needed to clone the private media repo
