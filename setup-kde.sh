@@ -29,13 +29,20 @@ set -euo pipefail
 # Config
 # ---------------------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"  # this repo (ships the qbt icon)
-BUILD_DIR="${BUILD_DIR:-$HOME/src}"          # where upstream repos are cloned/built
-WORKSPACE_DIR="${WORKSPACE_DIR:-$HOME/workspace}"  # where personal project repos live
-LOCAL_BIN="$HOME/.local/bin"
-APPS_DIR="$HOME/.local/share/applications"
+# Two repo roots, split by ownership (not by build system):
+#   BUILD_DIR     — third-party upstream repos (hey-cli, qbittorrent-tui, newsboat)
+#   WORKSPACE_DIR — your own (huntergdavis) projects (ortop, media, dunkingbird)
+BUILD_DIR="${BUILD_DIR:-$HOME/src}"
+WORKSPACE_DIR="${WORKSPACE_DIR:-$HOME/workspace}"
+# The one place binaries live. Built artifacts stay in their repo and are
+# symlinked in here, so /usr/local/bin is the single PATH entry that matters
+# and a rebuild is picked up with no stale copy. No ~/.local/bin anywhere.
+BIN_DIR="/usr/local/bin"
+APPS_DIR="$HOME/.local/share/applications"   # XDG per-user menu entries (not binaries)
 
 HEY_REPO="https://github.com/basecamp/hey-cli.git"
 ORTOP_REPO="https://github.com/huntergdavis/openrouter-tui.git"
+ORTOP_DIR="$WORKSPACE_DIR/ortop"   # your project, lives alongside media/dunkingbird
 NEWSBOAT_REPO="https://github.com/newsboat/newsboat.git"
 QBT_TUI_REPO="https://github.com/nickvanw/qbittorrent-tui.git"   # public
 MEDIA_REPO="git@github.com:huntergdavis/media.git"   # private; needs your GitHub SSH key
@@ -62,6 +69,14 @@ info() { printf '    %s\n' "$*"; }
 warn() { printf '\033[1;33m    !! %s\033[0m\n' "$*"; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# Symlink a built binary into BIN_DIR. -f replaces a prior copy/symlink (so an
+# old `install`-ed file migrates to a symlink); -n avoids descending into an
+# existing symlinked dir. Centralizes the "one binary location" rule.
+link_bin() {
+  local src="$1" name="${2:-$(basename "$1")}"
+  sudo ln -sfn "$src" "$BIN_DIR/$name"
+}
+
 # Clone if missing, otherwise pull latest. Echoes the repo dir.
 clone_or_update() {
   local url="$1" dir="$2"
@@ -74,7 +89,7 @@ clone_or_update() {
   fi
 }
 
-mkdir -p "$BUILD_DIR" "$WORKSPACE_DIR" "$LOCAL_BIN" "$APPS_DIR"
+mkdir -p "$BUILD_DIR" "$WORKSPACE_DIR" "$APPS_DIR"   # BIN_DIR (/usr/local/bin) already exists
 
 # ---------------------------------------------------------------------------
 # 1. apt build dependencies + toolchains
@@ -101,16 +116,16 @@ build_hey() {
   local dir="$BUILD_DIR/hey-cli"
   clone_or_update "$HEY_REPO" "$dir"
   ( cd "$dir" && make build )           # outputs bin/hey
-  sudo install -m 0755 "$dir/bin/hey" /usr/local/bin/hey
-  info "installed $(/usr/local/bin/hey --version 2>/dev/null | head -1 || echo hey)"
+  link_bin "$dir/bin/hey" hey
+  info "installed $("$BIN_DIR/hey" --version 2>/dev/null | head -1 || echo hey)"
 }
 
 build_ortop() {
-  say "Building ortop (openrouter-tui) -> $LOCAL_BIN/ortop"
-  local dir="$BUILD_DIR/openrouter-tui"
+  say "Building ortop (openrouter-tui) -> $BIN_DIR/ortop"
+  local dir="$ORTOP_DIR"
   clone_or_update "$ORTOP_REPO" "$dir"
   ( cd "$dir" && go build -o ortop ./... )
-  install -m 0755 "$dir/ortop" "$LOCAL_BIN/ortop"
+  link_bin "$dir/ortop" ortop
 }
 
 # qBittorrent TUI: a Bubble Tea terminal client for the qBittorrent WebUI API.
@@ -118,11 +133,11 @@ build_ortop() {
 # the client. The menu icon launches qbt-tui-gui, which bakes in the WebUI URL
 # and sources credentials from ~/.config/qbt-tui/env (see install_wrappers).
 build_qbt_tui() {
-  say "Building qBittorrent TUI (qbt-tui) -> $LOCAL_BIN/qbt-tui"
+  say "Building qBittorrent TUI (qbt-tui) -> $BIN_DIR/qbt-tui"
   local dir="$BUILD_DIR/qbittorrent-tui"
   clone_or_update "$QBT_TUI_REPO" "$dir"
   ( cd "$dir" && go build -o qbt-tui ./cmd/qbt-tui )
-  install -m 0755 "$dir/qbt-tui" "$LOCAL_BIN/qbt-tui"
+  link_bin "$dir/qbt-tui" qbt-tui
 }
 
 build_newsboat() {
@@ -201,10 +216,15 @@ install_dunkingbird() {
   fi
 
   # kdotool: window capture/focus backend used on KDE Wayland (best-effort).
+  # cargo can't write to /usr/local/bin without sudo, so build it into a cargo
+  # root under BUILD_DIR and symlink the binary into BIN_DIR like everything else.
   if [ "${XDG_SESSION_TYPE:-}" = "wayland" ] && ! have kdotool; then
     info "installing kdotool (KDE Wayland window backend)"
-    cargo install --git https://github.com/jinliu/kdotool --root "$HOME/.local" \
-      || warn "could not install kdotool; window targeting may be limited on KDE Wayland"
+    if cargo install --git https://github.com/jinliu/kdotool --root "$BUILD_DIR/cargo"; then
+      link_bin "$BUILD_DIR/cargo/bin/kdotool" kdotool
+    else
+      warn "could not install kdotool; window targeting may be limited on KDE Wayland"
+    fi
   fi
 }
 
@@ -305,9 +325,9 @@ install_rustdesk() {
 # 5. Wrapper scripts (recreated verbatim)
 # ---------------------------------------------------------------------------
 install_wrappers() {
-  say "Installing launcher wrapper scripts -> $LOCAL_BIN"
+  say "Installing launcher wrapper scripts -> $BIN_DIR"
 
-  cat > "$LOCAL_BIN/hey-journal" <<'EOF'
+  sudo tee "$BIN_DIR/hey-journal" >/dev/null <<'EOF'
 #!/usr/bin/env bash
 # Launcher wrapper for the "HEY Journal" KDE menu entry.
 # `hey journal write` opens $EDITOR; GUI launches don't always have it set,
@@ -317,7 +337,7 @@ export VISUAL="${VISUAL:-$EDITOR}"
 exec hey journal write "$@"
 EOF
 
-  cat > "$LOCAL_BIN/ortop-gui" <<'EOF'
+  sudo tee "$BIN_DIR/ortop-gui" >/dev/null <<'EOF'
 #!/usr/bin/env bash
 # Launcher wrapper for the ortop KDE menu entry.
 # GUI launches don't source ~/.bashrc, so load the OpenRouter keys explicitly.
@@ -325,7 +345,7 @@ EOF
 exec ortop "$@"
 EOF
 
-  cat > "$LOCAL_BIN/qbt-tui-gui" <<'EOF'
+  sudo tee "$BIN_DIR/qbt-tui-gui" >/dev/null <<'EOF'
 #!/usr/bin/env bash
 # Launcher wrapper for the qbt-tui KDE menu entry.
 # GUI launches don't source ~/.bashrc, so set the (non-secret) server URL here
@@ -335,7 +355,7 @@ export QBT_SERVER_URL="${QBT_SERVER_URL:-http://192.168.0.238:9999/}"
 exec qbt-tui "$@"
 EOF
 
-  chmod 0755 "$LOCAL_BIN/hey-journal" "$LOCAL_BIN/ortop-gui" "$LOCAL_BIN/qbt-tui-gui"
+  sudo chmod 0755 "$BIN_DIR/hey-journal" "$BIN_DIR/ortop-gui" "$BIN_DIR/qbt-tui-gui"
   if [ ! -f "$HOME/.config/ortop/env" ]; then
     warn "ortop needs ~/.config/ortop/env with your OpenRouter keys (not created by this script)"
   fi
@@ -384,7 +404,7 @@ Version=1.0
 Name=HEY Journal
 GenericName=Journal Entry
 Comment=Write today's HEY journal entry
-Exec=konsole --hold -p tabtitle=HEY\\sJournal -e $LOCAL_BIN/hey-journal
+Exec=konsole --hold -p tabtitle=HEY\\sJournal -e $BIN_DIR/hey-journal
 Icon=accessories-text-editor
 Terminal=false
 Categories=Utility;TextEditor;
@@ -412,7 +432,7 @@ EOF
 [Desktop Entry]
 Categories=System;Monitor;ConsoleOnly;
 Comment=Read-only terminal dashboard for your OpenRouter spend
-Exec=konsole --hold -p tabtitle=ortop -e $LOCAL_BIN/ortop-gui
+Exec=konsole --hold -p tabtitle=ortop -e $BIN_DIR/ortop-gui
 GenericName=OpenRouter Monitor
 Icon=utilities-system-monitor
 Keywords=openrouter;llm;monitor;dashboard;spend;
@@ -436,7 +456,7 @@ Version=1.0
 Name=qBittorrent TUI
 GenericName=Torrent Manager
 Comment=Terminal UI for the qBittorrent WebUI at 192.168.0.238:9999
-Exec=konsole -p tabtitle=qBittorrent -e $LOCAL_BIN/qbt-tui-gui
+Exec=konsole -p tabtitle=qBittorrent -e $BIN_DIR/qbt-tui-gui
 Icon=$SCRIPT_DIR/qbittorrent.svg
 Terminal=false
 Categories=Network;P2P;FileTransfer;
@@ -531,10 +551,32 @@ install_nfs_mounts() {
 }
 
 # ---------------------------------------------------------------------------
+# 0. Migrate off the old split layout (~/.local/bin, ~/src/openrouter-tui)
+# ---------------------------------------------------------------------------
+# Earlier versions installed some binaries to ~/.local/bin and cloned ortop to
+# ~/src/openrouter-tui. Ubuntu puts ~/.local/bin *ahead* of /usr/local/bin on
+# PATH, so a leftover copy there would shadow the new symlink — remove them.
+cleanup_legacy_layout() {
+  say "Cleaning up legacy ~/.local/bin and old ortop clone"
+  local b
+  for b in ortop qbt-tui ortop-gui qbt-tui-gui hey-journal kdotool; do
+    if [ -e "$HOME/.local/bin/$b" ] || [ -L "$HOME/.local/bin/$b" ]; then
+      info "removing stale ~/.local/bin/$b (now in $BIN_DIR)"
+      rm -f "$HOME/.local/bin/$b"
+    fi
+  done
+  if [ -d "$BUILD_DIR/openrouter-tui" ] && [ "$BUILD_DIR/openrouter-tui" != "$ORTOP_DIR" ]; then
+    info "removing old ortop clone at $BUILD_DIR/openrouter-tui (now $ORTOP_DIR)"
+    rm -rf "$BUILD_DIR/openrouter-tui"
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # Run
 # ---------------------------------------------------------------------------
 main() {
   install_build_deps
+  cleanup_legacy_layout
 
   build_hey
   build_ortop

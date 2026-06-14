@@ -15,13 +15,17 @@ Safe to re-run — every step is idempotent.
 **Menu icons** (`~/.local/share/applications/`): HEY, HEY Journal, Newsboat,
 ortop, Media Editor, Dunking Bird.
 
-**Programs:**
+**Programs:** every binary lives in **`/usr/local/bin`** (the one binary
+location). Built artifacts stay in their repo and are symlinked in, so a
+rebuild needs no reinstall. Repos split by ownership: third-party builds go to
+`~/src`, your own (huntergdavis) projects to `~/workspace`.
 
 | Program | Source |
 |---|---|
-| `hey` | built from `basecamp/hey-cli` → `/usr/local/bin/hey` |
-| `ortop` | built from `huntergdavis/openrouter-tui` → `~/.local/bin/ortop` |
-| `newsboat` | built from source → `/usr/local/bin/newsboat` |
+| `hey` | built from `basecamp/hey-cli` (`~/src`) → symlink `/usr/local/bin/hey` |
+| `ortop` | built from `huntergdavis/openrouter-tui` (`~/workspace/ortop`) → symlink `/usr/local/bin/ortop` |
+| `qbt-tui` | built from `nickvanw/qbittorrent-tui` (`~/src`) → symlink `/usr/local/bin/qbt-tui` |
+| `newsboat` | built from source (`~/src`) → `make install` to `/usr/local/bin/newsboat` |
 | Media Editor | cloned from `huntergdavis/media` (SSH) → `~/workspace/media` |
 | Dunking Bird | cloned from `huntergdavis/dunkingbird` → `~/workspace/dunkingbird` |
 | fresh-editor | snap (classic) — also set as the system-wide default editor |
@@ -41,8 +45,10 @@ also pulls in `ydotool`/`xclip`/`xdotool`, adds you to the `input` group
 targeting. Its menu icon runs the repo's own `run_dunking_bird.sh`, which
 starts the ydotool daemon and the TUI.
 
-Wrapper scripts `~/.local/bin/hey-journal` and `~/.local/bin/ortop-gui` are
-recreated too.
+Launcher wrappers `hey-journal`, `ortop-gui`, and `qbt-tui-gui` are written to
+`/usr/local/bin` too (the menu icons call these). Re-running the script also
+cleans up the old layout: any leftover binaries in `~/.local/bin` and the old
+`~/src/openrouter-tui` clone are removed.
 
 Override locations with `BUILD_DIR=/path` (upstream builds, default `~/src`)
 or `WORKSPACE_DIR=/path` (personal repos, default `~/workspace`).
