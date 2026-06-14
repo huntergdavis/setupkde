@@ -6,7 +6,7 @@
 #   HEY, HEY Journal, Newsboat, ortop, Media Editor, Dunking Bird,
 #   qBittorrent TUI, fresh-editor
 # plus the other apps installed by hand (duckstation, claude-desktop,
-# rustdesk, crystal-dock, firefox/thunderbird/bottom snaps).
+# rustdesk, firefox/thunderbird/bottom snaps).
 #
 # It also makes fresh-editor the system-wide default editor (EDITOR/VISUAL
 # and the `editor` alternative) via a wrapper, so git/crontab/hey all use it.
@@ -264,15 +264,6 @@ EOF
 # ---------------------------------------------------------------------------
 # 4. apt apps from extra repos / releases
 # ---------------------------------------------------------------------------
-install_crystal_dock() {
-  say "Installing crystal-dock (Ubuntu universe)"
-  if have crystal-dock || dpkg -s crystal-dock >/dev/null 2>&1; then
-    info "crystal-dock already installed"
-  else
-    sudo apt-get install -y crystal-dock
-  fi
-}
-
 install_claude_desktop() {
   say "Installing claude-desktop (pkg.claude-desktop-debian.dev)"
   if dpkg -s claude-desktop >/dev/null 2>&1; then
@@ -554,7 +545,6 @@ main() {
 
   install_snaps
   set_default_editor
-  install_crystal_dock
   install_claude_desktop
   install_rustdesk
 

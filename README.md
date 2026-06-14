@@ -27,7 +27,6 @@ ortop, Media Editor, Dunking Bird.
 | fresh-editor | snap (classic) — also set as the system-wide default editor |
 | duckstation | snap `duckstation-gpl` |
 | firefox, thunderbird, bottom | snaps |
-| crystal-dock | apt (Ubuntu universe) |
 | claude-desktop | apt repo `pkg.claude-desktop-debian.dev` |
 | rustdesk | latest `.deb` from GitHub releases |
 
