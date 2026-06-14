@@ -43,6 +43,14 @@ MEDIA_DIR="$WORKSPACE_DIR/media"
 DUNKING_REPO="https://github.com/huntergdavis/dunkingbird.git"   # public
 DUNKING_DIR="$WORKSPACE_DIR/dunkingbird"
 
+# NFS shares exported by monkeydluffy (192.168.0.238). Mounted read-write for
+# grsync. Each entry is "server_export|local_mountpoint".
+NFS_SERVER="192.168.0.238"
+NFS_MOUNTS=(
+  "/media/hunter/EasyStore18gb|/mnt/monkeydluffy/treasure"
+  "/media/hunter/Expansion28tb|/mnt/monkeydluffy/more_treasure"
+)
+
 # Path of the fresh-editor wrapper that fixes snap's argv[0] dispatch (see below).
 FRESH_WRAPPER="/usr/local/bin/fresh"
 
@@ -496,6 +504,42 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# 7. NFS mounts from monkeydluffy (for grsync)
+# ---------------------------------------------------------------------------
+# The drives "treasure" and "more treasure" live on monkeydluffy and are
+# exported over NFS (faster than SMB for Linux<->Linux). We mount them via
+# /etc/fstab using systemd automount so they:
+#   - survive reboot,
+#   - mount on first access (don't block boot), and
+#   - don't hang the machine if the server or a USB drive is offline (nofail).
+# This is the client side only; the NFS server config lives on monkeydluffy.
+install_nfs_mounts() {
+  say "Mounting monkeydluffy NFS shares (for grsync)"
+  sudo apt-get install -y nfs-common
+
+  local changed=0 export_path mountpoint line
+  for entry in "${NFS_MOUNTS[@]}"; do
+    export_path="${entry%%|*}"
+    mountpoint="${entry##*|}"
+    sudo mkdir -p "$mountpoint"
+    line="$NFS_SERVER:$export_path  $mountpoint  nfs  _netdev,nofail,x-systemd.automount,x-systemd.idle-timeout=600,noatime  0  0"
+    if grep -qF " $mountpoint " /etc/fstab; then
+      info "fstab entry for $mountpoint already present"
+    else
+      info "adding fstab entry for $mountpoint"
+      echo "$line" | sudo tee -a /etc/fstab >/dev/null
+      changed=1
+    fi
+  done
+
+  if [ "$changed" = 1 ]; then
+    sudo systemctl daemon-reload
+    sudo mount -a || warn "mount -a reported an error; check 'showmount -e $NFS_SERVER'"
+  fi
+  info "shares will mount on first access under /mnt/monkeydluffy/"
+}
+
+# ---------------------------------------------------------------------------
 # Run
 # ---------------------------------------------------------------------------
 main() {
@@ -516,12 +560,15 @@ main() {
 
   install_wrappers
   install_desktop_entries
+  install_nfs_mounts
 
   say "Done."
   cat <<EOF
 
 Menu icons created: HEY, HEY Journal, Newsboat, ortop, Media Editor, Dunking Bird,
 qBittorrent TUI.
+NFS shares from monkeydluffy mounted at /mnt/monkeydluffy/{treasure,more_treasure}
+(systemd automount; survives reboot, mounts on first access).
 fresh-editor is now the system-wide default editor (effective next login).
 Dunking Bird needs the 'input' group for ydotool — re-login if it was just added.
 Still up to you (secrets — intentionally not handled here):
