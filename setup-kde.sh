@@ -101,7 +101,7 @@ install_build_deps() {
     build-essential pkg-config git curl ca-certificates gnupg \
     cargo rustc golang-go gettext asciidoctor \
     libstfl-dev libsqlite3-dev libcurl4-openssl-dev \
-    libncurses-dev libxml2-dev libdbus-1-dev \
+    libncurses-dev libxml2-dev libdbus-1-dev libjson-c-dev \
     python3 python3-venv python3-pip \
     ydotool xclip xdotool \
     konsole snapd
@@ -290,11 +290,13 @@ install_claude_desktop() {
     info "claude-desktop already installed"; return
   fi
   local key=/usr/share/keyrings/claude-desktop.gpg
+  local key_url=https://pkg.claude-desktop-debian.dev/KEY.gpg
   local list=/etc/apt/sources.list.d/claude-desktop.list
-  if [ ! -f "$key" ]; then
+  if [ ! -s "$key" ] || ! gpg --quiet --show-keys "$key" >/dev/null 2>&1; then
     info "fetching signing key"
-    curl -fsSL https://pkg.claude-desktop-debian.dev/public.key \
-      | sudo gpg --dearmor -o "$key" \
+    sudo rm -f "$key"
+    curl -fsSL "$key_url" \
+      | sudo gpg --dearmor --yes -o "$key" \
       || { warn "could not fetch claude-desktop key; skipping. See https://github.com/aaddrick/claude-desktop-debian"; return; }
   fi
   echo "deb [signed-by=$key arch=amd64,arm64] https://pkg.claude-desktop-debian.dev stable main" \
