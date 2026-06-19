@@ -248,10 +248,16 @@ install_dunkingbird() {
 # Motion Cues: a Linux port of Apple's Vehicle Motion Cues (iOS 18 / macOS 15).
 # A PyQt6 GUI app that drifts peripheral dots matching vehicle motion to reduce
 # motion sickness while using a laptop in a car. Third-party Python package, so
-# we install it into its own venv (like media/dunkingbird) and symlink the venv's
-# `motion-cues` entry point into BIN_DIR. It lives in the system tray (not a TUI),
-# so its menu icon launches it directly with no terminal.
-# Note: upstream targets X11; on KDE Wayland it runs via XWayland.
+# we install it into its own venv (like media/dunkingbird). It lives in the
+# system tray (not a TUI), so its menu icon launches it directly with no terminal.
+#
+# Rather than symlink the venv entry point straight into BIN_DIR, the `motion-cues`
+# command in BIN_DIR is a thin wrapper: the app drives X11 ShapeBounding/ShapeInput
+# directly on its own window, which fails under a native Wayland Qt platform
+# (winId() is a Wayland surface, not an X window). The wrapper forces Qt's xcb
+# platform so it runs as a real X11 client via XWayland on KDE Wayland; harmless on
+# a true X11 session. Baking it into the command itself means `motion-cues` works
+# the same from the terminal as from the menu icon.
 install_motion_cues() {
   say "Installing Motion Cues (motion-cues) -> venv + $BIN_DIR/motion-cues"
   # Runtime X11 libs the PyQt6 overlay needs (XWayland on Wayland sessions).
@@ -272,7 +278,24 @@ install_motion_cues() {
     warn "pip install of motion-cues failed (PyQt6 may lack a wheel for this Python); skipping"
     return 0
   fi
-  link_bin "$MOTION_CUES_DIR/venv/bin/motion-cues" motion-cues
+
+  # The `motion-cues` command itself forces the xcb platform (XWayland fallback),
+  # so it works identically from the terminal and from the menu icon.
+  # rm first: earlier versions symlinked this to the venv binary, and `tee`
+  # would otherwise follow that symlink and overwrite the venv entry point.
+  sudo rm -f "$BIN_DIR/motion-cues"
+  sudo tee "$BIN_DIR/motion-cues" >/dev/null <<EOF
+#!/usr/bin/env bash
+# Wrapper for the Motion Cues venv install.
+# Motion Cues drives X11 ShapeBounding/ShapeInput directly on its own window.
+# Under a native Wayland Qt platform, winId() is a Wayland surface (not an X
+# window), so those Xlib SHAPE calls fail with BadWindow. Forcing Qt's xcb
+# platform makes it a real X11 client via XWayland with a valid window id.
+# Harmless on a true X11 session, where xcb is already the default.
+export QT_QPA_PLATFORM="\${QT_QPA_PLATFORM:-xcb}"
+exec "$MOTION_CUES_DIR/venv/bin/motion-cues" "\$@"
+EOF
+  sudo chmod 0755 "$BIN_DIR/motion-cues"
 }
 
 # JellyTerm: a terminal Jellyfin browser/player. Its own installer manages the
@@ -424,18 +447,6 @@ export QBT_SERVER_URL="${QBT_SERVER_URL:-http://192.168.0.238:9999/}"
 exec qbt-tui "$@"
 EOF
 
-  sudo tee "$BIN_DIR/motion-cues-gui" >/dev/null <<'EOF'
-#!/usr/bin/env bash
-# Launcher wrapper for the Motion Cues KDE menu entry.
-# Motion Cues drives X11 ShapeBounding/ShapeInput directly on its own window.
-# Under a native Wayland Qt platform, winId() is a Wayland surface (not an X
-# window), so those Xlib SHAPE calls fail with BadWindow. Forcing Qt's xcb
-# platform makes it a real X11 client via XWayland with a valid window id.
-# Harmless on a true X11 session, where xcb is already the default.
-export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-xcb}"
-exec motion-cues "$@"
-EOF
-
   if [ -f "$JELLYTERM_DIR/scripts/run.sh" ]; then
     sudo tee "$BIN_DIR/jellyterm" >/dev/null <<EOF
 #!/usr/bin/env bash
@@ -448,7 +459,7 @@ EOF
     warn "skipping JellyTerm PATH wrapper (runner not present at $JELLYTERM_DIR/scripts/run.sh)"
   fi
 
-  sudo chmod 0755 "$BIN_DIR/hey-journal" "$BIN_DIR/ortop-gui" "$BIN_DIR/qbt-tui-gui" "$BIN_DIR/motion-cues-gui"
+  sudo chmod 0755 "$BIN_DIR/hey-journal" "$BIN_DIR/ortop-gui" "$BIN_DIR/qbt-tui-gui"
   if [ ! -f "$HOME/.config/ortop/env" ]; then
     warn "ortop needs ~/.config/ortop/env with your OpenRouter keys (not created by this script)"
   fi
@@ -633,7 +644,7 @@ Version=1.0
 Name=Motion Cues
 GenericName=Vehicle Motion Cues
 Comment=Peripheral dots that reduce motion sickness using a laptop in a vehicle
-Exec=$BIN_DIR/motion-cues-gui
+Exec=$BIN_DIR/motion-cues
 Icon=preferences-desktop-display
 Terminal=false
 Categories=Utility;Accessibility;

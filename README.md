@@ -29,7 +29,7 @@ rebuild needs no reinstall. Repos split by ownership: third-party builds go to
 | Media Editor | cloned from `huntergdavis/media` (SSH) → `~/workspace/media` |
 | Dunking Bird | cloned from `huntergdavis/dunkingbird` → `~/workspace/dunkingbird` |
 | JellyTerm | cloned from `huntergdavis/jellyterm` → `~/workspace/jellyterm`; installer runs unattended with default `mpv-terminal` playback and wrapper `/usr/local/bin/jellyterm` |
-| Motion Cues | cloned from `monperrus/motion-cues` (`~/src`) → venv install, symlink `/usr/local/bin/motion-cues` |
+| Motion Cues | cloned from `monperrus/motion-cues` (`~/src`) → venv install, wrapper `/usr/local/bin/motion-cues` (forces xcb) |
 | fresh-editor | snap (classic) — also set as the system-wide default editor |
 | duckstation | snap `duckstation-gpl` |
 | firefox, thunderbird, bottom | snaps |
@@ -50,15 +50,17 @@ starts the ydotool daemon and the TUI.
 **Motion Cues** is a PyQt6 system-tray GUI (a Linux port of Apple's Vehicle
 Motion Cues) that drifts peripheral dots to reduce motion sickness. It installs
 into its own venv under `~/src/motion-cues`. It drives X11 ShapeBounding/
-ShapeInput directly, so its `motion-cues-gui` wrapper forces Qt's `xcb` platform
-(real X11 client via XWayland on KDE Wayland; a no-op on a true X11 session).
+ShapeInput directly, so the `motion-cues` command in `/usr/local/bin` is a thin
+wrapper that forces Qt's `xcb` platform (real X11 client via XWayland on KDE
+Wayland; a no-op on a true X11 session). Forcing it in the command itself means
+`motion-cues` works the same from the terminal as from the menu icon.
 
 **JellyTerm** uses its own `scripts/install.sh --yes --player mpv-terminal`
 path so the Python venv and `mpv` prerequisite are refreshed without prompts.
 
-Launcher wrappers `hey-journal`, `ortop-gui`, `qbt-tui-gui`,
-`motion-cues-gui`, and `jellyterm` are written to `/usr/local/bin` too (the
-menu icons call these). Re-running the script also
+Launcher wrappers `hey-journal`, `ortop-gui`, `qbt-tui-gui`, and `jellyterm`
+are written to `/usr/local/bin` too (the menu icons call these). Re-running the
+script also
 cleans up the old layout: any leftover binaries in `~/.local/bin` and the old
 `~/src/openrouter-tui` clone are removed.
 
