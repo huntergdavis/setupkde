@@ -4,7 +4,7 @@
 #
 # Installs the programs and creates the KDE menu icons for:
 #   HEY, HEY Journal, Newsboat, ortop, Media Editor, Dunking Bird,
-#   qBittorrent TUI, Motion Cues, fresh-editor
+#   JellyTerm, qBittorrent TUI, Motion Cues, fresh-editor
 # plus the other apps installed by hand (duckstation, claude-desktop,
 # rustdesk, tailscale, firefox/thunderbird/bottom snaps).
 #
@@ -16,6 +16,7 @@
 #   - ~/.config/ortop/env        (OpenRouter API keys; sourced by ortop-gui)
 #   - ~/.config/qbt-tui/env      (qBittorrent WebUI creds; sourced by qbt-tui-gui)
 #   - HEY login / `hey` config
+#   - JellyTerm / Jellyfin login
 #   - newsboat ~/.config/newsboat/urls (FreshRSS aggregator + creds)
 #
 # The Media Editor repo is private; cloning it needs your SSH key set up
@@ -31,7 +32,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"  # this repo (ships the qbt icon)
 # Two repo roots, split by ownership (not by build system):
 #   BUILD_DIR     — third-party upstream repos (hey-cli, qbittorrent-tui, newsboat)
-#   WORKSPACE_DIR — your own (huntergdavis) projects (ortop, media, dunkingbird)
+#   WORKSPACE_DIR — your own (huntergdavis) projects (ortop, media, dunkingbird, jellyterm)
 BUILD_DIR="${BUILD_DIR:-$HOME/src}"
 WORKSPACE_DIR="${WORKSPACE_DIR:-$HOME/workspace}"
 # The one place binaries live. Built artifacts stay in their repo and are
@@ -51,6 +52,8 @@ DUNKING_REPO="https://github.com/huntergdavis/dunkingbird.git"   # public
 DUNKING_DIR="$WORKSPACE_DIR/dunkingbird"
 MOTION_CUES_REPO="https://github.com/monperrus/motion-cues.git"   # public, third-party
 MOTION_CUES_DIR="$BUILD_DIR/motion-cues"
+JELLYTERM_REPO="https://github.com/huntergdavis/jellyterm.git"   # public
+JELLYTERM_DIR="$WORKSPACE_DIR/jellyterm"
 
 # NFS shares exported by monkeydluffy (192.168.0.238). Mounted read-write for
 # grsync. Each entry is "server_export|local_mountpoint".
@@ -272,6 +275,20 @@ install_motion_cues() {
   link_bin "$MOTION_CUES_DIR/venv/bin/motion-cues" motion-cues
 }
 
+# JellyTerm: a terminal Jellyfin browser/player. Its own installer manages the
+# Python venv and OS player prerequisites; --yes keeps setup-kde unattended.
+install_jellyterm() {
+  say "Installing JellyTerm (jellyterm) -> $JELLYTERM_DIR"
+  clone_or_update "$JELLYTERM_REPO" "$JELLYTERM_DIR"
+  chmod 0755 "$JELLYTERM_DIR/scripts/install.sh" "$JELLYTERM_DIR/scripts/run.sh" 2>/dev/null || true
+
+  if [ -x "$JELLYTERM_DIR/scripts/install.sh" ]; then
+    ( cd "$JELLYTERM_DIR" && ./scripts/install.sh --yes --player mpv-terminal )
+  else
+    warn "skipping JellyTerm install (installer not present at $JELLYTERM_DIR/scripts/install.sh)"
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # 3. Snaps: fresh-editor, duckstation, and the rest
 # ---------------------------------------------------------------------------
@@ -419,6 +436,18 @@ export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-xcb}"
 exec motion-cues "$@"
 EOF
 
+  if [ -f "$JELLYTERM_DIR/scripts/run.sh" ]; then
+    sudo tee "$BIN_DIR/jellyterm" >/dev/null <<EOF
+#!/usr/bin/env bash
+# Launcher wrapper for JellyTerm. Keep this as a wrapper, not a symlink to
+# scripts/run.sh, so the project root stays stable when invoked from PATH.
+exec "$JELLYTERM_DIR/scripts/run.sh" "\$@"
+EOF
+    sudo chmod 0755 "$BIN_DIR/jellyterm"
+  else
+    warn "skipping JellyTerm PATH wrapper (runner not present at $JELLYTERM_DIR/scripts/run.sh)"
+  fi
+
   sudo chmod 0755 "$BIN_DIR/hey-journal" "$BIN_DIR/ortop-gui" "$BIN_DIR/qbt-tui-gui" "$BIN_DIR/motion-cues-gui"
   if [ ! -f "$HOME/.config/ortop/env" ]; then
     warn "ortop needs ~/.config/ortop/env with your OpenRouter keys (not created by this script)"
@@ -529,6 +558,27 @@ StartupNotify=true
 EOF
 
   chmod 0644 "$APPS_DIR"/{hey,hey-journal,newsboat,ortop,qbt-tui}.desktop
+
+  # JellyTerm — launches through the /usr/local/bin wrapper so it is also on PATH.
+  if [ -f "$JELLYTERM_DIR/scripts/run.sh" ]; then
+    cat > "$APPS_DIR/jellyterm.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=JellyTerm
+GenericName=Jellyfin Terminal Client
+Comment=Browse Jellyfin and play media from the terminal
+Exec=konsole -p tabtitle=JellyTerm -e $BIN_DIR/jellyterm
+Icon=multimedia-player
+Terminal=false
+Categories=AudioVideo;Player;Video;
+Keywords=jellyfin;jellyterm;media;movies;shows;music;tui;
+StartupNotify=true
+EOF
+    chmod 0644 "$APPS_DIR/jellyterm.desktop"
+  else
+    warn "skipping JellyTerm menu icon (repo not present at $JELLYTERM_DIR)"
+  fi
 
   # Media Editor — only wire it up if the repo actually cloned.
   if [ -f "$MEDIA_DIR/run-tui.sh" ]; then
@@ -645,7 +695,7 @@ install_nfs_mounts() {
 cleanup_legacy_layout() {
   say "Cleaning up legacy ~/.local/bin and old ortop clone"
   local b
-  for b in ortop qbt-tui ortop-gui qbt-tui-gui hey-journal kdotool; do
+  for b in ortop qbt-tui ortop-gui qbt-tui-gui hey-journal jellyterm kdotool; do
     if [ -e "$HOME/.local/bin/$b" ] || [ -L "$HOME/.local/bin/$b" ]; then
       info "removing stale ~/.local/bin/$b (now in $BIN_DIR)"
       rm -f "$HOME/.local/bin/$b"
@@ -670,6 +720,7 @@ main() {
   build_newsboat
   install_media
   install_dunkingbird
+  install_jellyterm
   install_motion_cues
 
   install_snaps
@@ -686,7 +737,7 @@ main() {
   cat <<EOF
 
 Menu icons created: HEY, HEY Journal, Newsboat, ortop, Media Editor, Dunking Bird,
-qBittorrent TUI, Motion Cues.
+JellyTerm, qBittorrent TUI, Motion Cues.
 Tailscale installed (run: sudo tailscale up   to authenticate and connect).
 NFS shares from monkeydluffy mounted at /mnt/monkeydluffy/{treasure,more_treasure}
 (systemd automount; survives reboot, mounts on first access).
@@ -696,6 +747,7 @@ Still up to you (secrets — intentionally not handled here):
   - ~/.config/ortop/env   OpenRouter API keys
   - ~/.config/qbt-tui/env qBittorrent WebUI username+password (or api_key)
   - HEY login             run: hey   (and sign in)
+  - Jellyfin login        run: jellyterm   (and sign in)
   - ~/.config/newsboat/urls   your FreshRSS endpoint + credentials
   - GitHub SSH key        needed to clone the private media repo
 EOF
