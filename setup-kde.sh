@@ -6,7 +6,7 @@
 #   HEY, HEY Journal, Newsboat, ortop, Media Editor, Dunking Bird,
 #   qBittorrent TUI, fresh-editor
 # plus the other apps installed by hand (duckstation, claude-desktop,
-# rustdesk, torguard, firefox/thunderbird/bottom snaps).
+# rustdesk, tailscale, firefox/thunderbird/bottom snaps).
 #
 # It also makes fresh-editor the system-wide default editor (EDITOR/VISUAL
 # and the `editor` alternative) via a wrapper, so git/crontab/hey all use it.
@@ -335,17 +335,10 @@ install_rustdesk() {
   sudo apt-get install -y "$deb"
 }
 
-install_torguard() {
-  say "Installing TorGuard VPN client (.deb from torguard.net)"
-  if dpkg -s torguard >/dev/null 2>&1; then
-    info "torguard already installed"; return
-  fi
-  local url="https://updates.torguard.biz/Software/Linux/torguard-latest-amd64.deb"
-  local deb="$BUILD_DIR/torguard-latest-amd64.deb"
-  info "downloading torguard-latest-amd64.deb"
-  curl -fsSL -o "$deb" "$url" \
-    || { warn "could not download TorGuard .deb; skipping. See https://torguard.net/downloads.php"; return; }
-  sudo apt-get install -y "$deb"
+install_tailscale() {
+  say "Installing Tailscale"
+  if have tailscale; then info "tailscale already installed"; return; fi
+  curl -fsSL https://tailscale.com/install.sh | sh
 }
 
 # ---------------------------------------------------------------------------
@@ -616,7 +609,7 @@ main() {
   set_default_editor
   install_claude_desktop
   install_rustdesk
-  install_torguard
+  install_tailscale
 
   install_wrappers
   install_desktop_entries
@@ -627,7 +620,7 @@ main() {
 
 Menu icons created: HEY, HEY Journal, Newsboat, ortop, Media Editor, Dunking Bird,
 qBittorrent TUI.
-TorGuard VPN installed (launch from the app menu or run: torguard).
+Tailscale installed (run: sudo tailscale up   to authenticate and connect).
 NFS shares from monkeydluffy mounted at /mnt/monkeydluffy/{treasure,more_treasure}
 (systemd automount; survives reboot, mounts on first access).
 fresh-editor is now the system-wide default editor (effective next login).
