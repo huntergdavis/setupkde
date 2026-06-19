@@ -6,7 +6,7 @@
 #   HEY, HEY Journal, Newsboat, ortop, Media Editor, Dunking Bird,
 #   qBittorrent TUI, fresh-editor
 # plus the other apps installed by hand (duckstation, claude-desktop,
-# rustdesk, firefox/thunderbird/bottom snaps).
+# rustdesk, torguard, firefox/thunderbird/bottom snaps).
 #
 # It also makes fresh-editor the system-wide default editor (EDITOR/VISUAL
 # and the `editor` alternative) via a wrapper, so git/crontab/hey all use it.
@@ -97,14 +97,26 @@ mkdir -p "$BUILD_DIR" "$WORKSPACE_DIR" "$APPS_DIR"   # BIN_DIR (/usr/local/bin) 
 install_build_deps() {
   say "Installing build toolchains and dependencies (apt)"
   sudo apt-get update -qq
+  # cargo/rustc from apt are often too old for recent crates (e.g. newsboat
+  # requires resolver = "3" which needs cargo 1.84+). We install via rustup
+  # below and skip the apt rust packages.
   sudo apt-get install -y \
     build-essential pkg-config git curl ca-certificates gnupg \
-    cargo rustc golang-go gettext asciidoctor \
+    golang-go gettext asciidoctor \
     libstfl-dev libsqlite3-dev libcurl4-openssl-dev \
     libncurses-dev libxml2-dev libdbus-1-dev libjson-c-dev \
     python3 python3-venv python3-pip \
     ydotool xclip xdotool \
     konsole snapd
+
+  # Install rustup (provides up-to-date cargo/rustc) if not already present.
+  if ! command -v rustup >/dev/null 2>&1; then
+    say "Installing rustup (stable Rust toolchain)"
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
+  fi
+  # Ensure cargo is on PATH for the remainder of this script run.
+  # shellcheck source=/dev/null
+  [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
 }
 
 # ---------------------------------------------------------------------------
@@ -320,6 +332,19 @@ install_rustdesk() {
   local deb="$BUILD_DIR/$(basename "$url")"
   info "downloading $(basename "$url")"
   curl -fsSL -o "$deb" "$url"
+  sudo apt-get install -y "$deb"
+}
+
+install_torguard() {
+  say "Installing TorGuard VPN client (.deb from torguard.net)"
+  if dpkg -s torguard >/dev/null 2>&1; then
+    info "torguard already installed"; return
+  fi
+  local url="https://updates.torguard.biz/Software/Linux/torguard-latest-amd64.deb"
+  local deb="$BUILD_DIR/torguard-latest-amd64.deb"
+  info "downloading torguard-latest-amd64.deb"
+  curl -fsSL -o "$deb" "$url" \
+    || { warn "could not download TorGuard .deb; skipping. See https://torguard.net/downloads.php"; return; }
   sudo apt-get install -y "$deb"
 }
 
@@ -591,6 +616,7 @@ main() {
   set_default_editor
   install_claude_desktop
   install_rustdesk
+  install_torguard
 
   install_wrappers
   install_desktop_entries
@@ -601,6 +627,7 @@ main() {
 
 Menu icons created: HEY, HEY Journal, Newsboat, ortop, Media Editor, Dunking Bird,
 qBittorrent TUI.
+TorGuard VPN installed (launch from the app menu or run: torguard).
 NFS shares from monkeydluffy mounted at /mnt/monkeydluffy/{treasure,more_treasure}
 (systemd automount; survives reboot, mounts on first access).
 fresh-editor is now the system-wide default editor (effective next login).
