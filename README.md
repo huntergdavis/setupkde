@@ -13,7 +13,7 @@ Safe to re-run — every step is idempotent.
 ## What it does
 
 **Menu icons** (`~/.local/share/applications/`): HEY, HEY Journal, Newsboat,
-ortop, Media Editor, Dunking Bird.
+ortop, Media Editor, Dunking Bird, qBittorrent TUI, Motion Cues.
 
 **Programs:** every binary lives in **`/usr/local/bin`** (the one binary
 location). Built artifacts stay in their repo and are symlinked in, so a
@@ -28,6 +28,7 @@ rebuild needs no reinstall. Repos split by ownership: third-party builds go to
 | `newsboat` | built from source (`~/src`) → `make install` to `/usr/local/bin/newsboat` |
 | Media Editor | cloned from `huntergdavis/media` (SSH) → `~/workspace/media` |
 | Dunking Bird | cloned from `huntergdavis/dunkingbird` → `~/workspace/dunkingbird` |
+| Motion Cues | cloned from `monperrus/motion-cues` (`~/src`) → venv install, symlink `/usr/local/bin/motion-cues` |
 | fresh-editor | snap (classic) — also set as the system-wide default editor |
 | duckstation | snap `duckstation-gpl` |
 | firefox, thunderbird, bottom | snaps |
@@ -45,8 +46,14 @@ also pulls in `ydotool`/`xclip`/`xdotool`, adds you to the `input` group
 targeting. Its menu icon runs the repo's own `run_dunking_bird.sh`, which
 starts the ydotool daemon and the TUI.
 
-Launcher wrappers `hey-journal`, `ortop-gui`, and `qbt-tui-gui` are written to
-`/usr/local/bin` too (the menu icons call these). Re-running the script also
+**Motion Cues** is a PyQt6 system-tray GUI (a Linux port of Apple's Vehicle
+Motion Cues) that drifts peripheral dots to reduce motion sickness. It installs
+into its own venv under `~/src/motion-cues`. It drives X11 ShapeBounding/
+ShapeInput directly, so its `motion-cues-gui` wrapper forces Qt's `xcb` platform
+(real X11 client via XWayland on KDE Wayland; a no-op on a true X11 session).
+
+Launcher wrappers `hey-journal`, `ortop-gui`, `qbt-tui-gui`, and `motion-cues-gui`
+are written to `/usr/local/bin` too (the menu icons call these). Re-running the script also
 cleans up the old layout: any leftover binaries in `~/.local/bin` and the old
 `~/src/openrouter-tui` clone are removed.
 

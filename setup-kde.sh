@@ -4,7 +4,7 @@
 #
 # Installs the programs and creates the KDE menu icons for:
 #   HEY, HEY Journal, Newsboat, ortop, Media Editor, Dunking Bird,
-#   qBittorrent TUI, fresh-editor
+#   qBittorrent TUI, Motion Cues, fresh-editor
 # plus the other apps installed by hand (duckstation, claude-desktop,
 # rustdesk, tailscale, firefox/thunderbird/bottom snaps).
 #
@@ -49,6 +49,8 @@ MEDIA_REPO="git@github.com:huntergdavis/media.git"   # private; needs your GitHu
 MEDIA_DIR="$WORKSPACE_DIR/media"
 DUNKING_REPO="https://github.com/huntergdavis/dunkingbird.git"   # public
 DUNKING_DIR="$WORKSPACE_DIR/dunkingbird"
+MOTION_CUES_REPO="https://github.com/monperrus/motion-cues.git"   # public, third-party
+MOTION_CUES_DIR="$BUILD_DIR/motion-cues"
 
 # NFS shares exported by monkeydluffy (192.168.0.238). Mounted read-write for
 # grsync. Each entry is "server_export|local_mountpoint".
@@ -240,6 +242,36 @@ install_dunkingbird() {
   fi
 }
 
+# Motion Cues: a Linux port of Apple's Vehicle Motion Cues (iOS 18 / macOS 15).
+# A PyQt6 GUI app that drifts peripheral dots matching vehicle motion to reduce
+# motion sickness while using a laptop in a car. Third-party Python package, so
+# we install it into its own venv (like media/dunkingbird) and symlink the venv's
+# `motion-cues` entry point into BIN_DIR. It lives in the system tray (not a TUI),
+# so its menu icon launches it directly with no terminal.
+# Note: upstream targets X11; on KDE Wayland it runs via XWayland.
+install_motion_cues() {
+  say "Installing Motion Cues (motion-cues) -> venv + $BIN_DIR/motion-cues"
+  # Runtime X11 libs the PyQt6 overlay needs (XWayland on Wayland sessions).
+  sudo apt-get install -y libx11-6 libxext6
+  clone_or_update "$MOTION_CUES_REPO" "$MOTION_CUES_DIR"
+
+  if [ ! -d "$MOTION_CUES_DIR/venv" ]; then
+    info "creating venv"
+    if ! python3 -m venv "$MOTION_CUES_DIR/venv"; then
+      rm -rf "$MOTION_CUES_DIR/venv"
+      warn "venv creation failed; skipping Motion Cues"
+      return 0
+    fi
+  fi
+  "$MOTION_CUES_DIR/venv/bin/pip" install --quiet --upgrade pip
+  # Install the cloned repo (pulls in PyQt6); editable so a `git pull` is live.
+  if ! "$MOTION_CUES_DIR/venv/bin/pip" install --quiet -e "$MOTION_CUES_DIR"; then
+    warn "pip install of motion-cues failed (PyQt6 may lack a wheel for this Python); skipping"
+    return 0
+  fi
+  link_bin "$MOTION_CUES_DIR/venv/bin/motion-cues" motion-cues
+}
+
 # ---------------------------------------------------------------------------
 # 3. Snaps: fresh-editor, duckstation, and the rest
 # ---------------------------------------------------------------------------
@@ -375,7 +407,19 @@ export QBT_SERVER_URL="${QBT_SERVER_URL:-http://192.168.0.238:9999/}"
 exec qbt-tui "$@"
 EOF
 
-  sudo chmod 0755 "$BIN_DIR/hey-journal" "$BIN_DIR/ortop-gui" "$BIN_DIR/qbt-tui-gui"
+  sudo tee "$BIN_DIR/motion-cues-gui" >/dev/null <<'EOF'
+#!/usr/bin/env bash
+# Launcher wrapper for the Motion Cues KDE menu entry.
+# Motion Cues drives X11 ShapeBounding/ShapeInput directly on its own window.
+# Under a native Wayland Qt platform, winId() is a Wayland surface (not an X
+# window), so those Xlib SHAPE calls fail with BadWindow. Forcing Qt's xcb
+# platform makes it a real X11 client via XWayland with a valid window id.
+# Harmless on a true X11 session, where xcb is already the default.
+export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-xcb}"
+exec motion-cues "$@"
+EOF
+
+  sudo chmod 0755 "$BIN_DIR/hey-journal" "$BIN_DIR/ortop-gui" "$BIN_DIR/qbt-tui-gui" "$BIN_DIR/motion-cues-gui"
   if [ ! -f "$HOME/.config/ortop/env" ]; then
     warn "ortop needs ~/.config/ortop/env with your OpenRouter keys (not created by this script)"
   fi
@@ -529,6 +573,28 @@ EOF
     warn "skipping Dunking Bird menu icon (repo not present at $DUNKING_DIR)"
   fi
 
+  # Motion Cues — a PyQt6 system-tray GUI (not a TUI), so launch it directly
+  # with no terminal. Only wire up if the venv entry point actually installed.
+  if [ -x "$MOTION_CUES_DIR/venv/bin/motion-cues" ]; then
+    cat > "$APPS_DIR/motion-cues.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Motion Cues
+GenericName=Vehicle Motion Cues
+Comment=Peripheral dots that reduce motion sickness using a laptop in a vehicle
+Exec=$BIN_DIR/motion-cues-gui
+Icon=preferences-desktop-display
+Terminal=false
+Categories=Utility;Accessibility;
+Keywords=motion;cues;sickness;vehicle;car;dots;overlay;
+StartupNotify=false
+EOF
+    chmod 0644 "$APPS_DIR/motion-cues.desktop"
+  else
+    warn "skipping Motion Cues menu icon (motion-cues not installed)"
+  fi
+
   if have update-desktop-database; then
     update-desktop-database "$APPS_DIR" 2>/dev/null || true
   fi
@@ -604,6 +670,7 @@ main() {
   build_newsboat
   install_media
   install_dunkingbird
+  install_motion_cues
 
   install_snaps
   set_default_editor
@@ -619,7 +686,7 @@ main() {
   cat <<EOF
 
 Menu icons created: HEY, HEY Journal, Newsboat, ortop, Media Editor, Dunking Bird,
-qBittorrent TUI.
+qBittorrent TUI, Motion Cues.
 Tailscale installed (run: sudo tailscale up   to authenticate and connect).
 NFS shares from monkeydluffy mounted at /mnt/monkeydluffy/{treasure,more_treasure}
 (systemd automount; survives reboot, mounts on first access).
