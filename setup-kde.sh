@@ -6,7 +6,7 @@
 # unprivileged Android app, so the environment is fundamentally different:
 #   - NO root / NO sudo            -> everything installs into $PREFIX (user-owned)
 #   - NO /usr/local/bin            -> the one binary dir is $PREFIX/bin
-#   - NO snap / snapd              -> snap apps are built from source or dropped
+#   - NO snap / snapd              -> snap apps come from pkg, source, or dropped
 #   - NO systemd                   -> the NFS automount step is gone
 #   - aarch64 (bionic libc)        -> glibc/x86_64 .deb apps can't run here
 #   - KDE Plasma 6 + konsole are already installed (and version-pinned), so we
@@ -65,10 +65,8 @@ DUNKING_REPO="https://github.com/huntergdavis/dunkingbird.git"   # public
 DUNKING_DIR="$WORKSPACE_DIR/dunkingbird"
 JELLYTERM_REPO="https://github.com/huntergdavis/jellyterm.git"   # public
 JELLYTERM_DIR="$WORKSPACE_DIR/jellyterm"
-FRESH_REPO="https://github.com/sinelaw/fresh.git"   # upstream of the fresh-editor snap (Rust)
-FRESH_DIR="$BUILD_DIR/fresh"
 
-# Path of the fresh-editor binary (built from source, symlinked here).
+# Path of the fresh-editor binary (installed by the fresh-editor Termux package).
 FRESH_BIN="$BIN_DIR/fresh"
 
 # ---------------------------------------------------------------------------
@@ -285,23 +283,26 @@ install_jellyterm() {
 }
 
 # ---------------------------------------------------------------------------
-# 3. From-source replacements for the old snaps: fresh-editor, bottom
+# 3. Replacements for the old snaps: fresh-editor, bottom
 # ---------------------------------------------------------------------------
-# Snap doesn't exist on Termux (no systemd, no root, squashfs can't be mounted),
-# so the two snaps we still want are built from source with the cargo that's
-# already installed. firefox (already installed via pkg), thunderbird, and
+# Snap doesn't exist on Termux (no systemd, no root, squashfs can't be mounted).
+# fresh-editor is packaged for Termux, so we install that. bottom isn't, so it's
+# built from source. firefox (already installed via pkg), thunderbird, and
 # duckstation are intentionally not handled here.
+#
+# fresh-editor: do NOT build from source on Termux. The upstream (sinelaw/fresh)
+# pulls several deps that exclude target_os="android" (trash, arboard) plus an
+# embedded JS runtime (rquickjs-sys needs bindgen for aarch64), and the release
+# profile's fat LTO OOMs rustc on a phone. Termux packages fresh-editor at the
+# same version (0.4.1), already cross-compiled for aarch64 — just install it.
 build_fresh_editor() {
-  say "Building fresh-editor (sinelaw/fresh) -> $FRESH_BIN"
-  clone_or_update "$FRESH_REPO" "$FRESH_DIR"
-  # Termux has no rustup, so the repo's rust-toolchain.toml pin is ignored and
-  # the system rust is used. If that's too old the build fails — tolerate it so
-  # the rest of the script (and a fallback editor) still works.
-  if ( cd "$FRESH_DIR" && cargo build --release ) && [ -x "$FRESH_DIR/target/release/fresh" ]; then
-    link_bin "$FRESH_DIR/target/release/fresh" fresh
-    info "fresh-editor -> $FRESH_BIN"
+  say "Installing fresh-editor -> $FRESH_BIN"
+  if have fresh; then
+    info "fresh already installed ($(fresh --version 2>/dev/null | head -1))"
+  elif apt-get install -y fresh-editor; then
+    info "fresh-editor installed from the Termux package"
   else
-    warn "fresh-editor build failed (system rust may be older than its toolchain pin); EDITOR will fall back to vim/nano"
+    warn "could not install the fresh-editor package; EDITOR will fall back to vim/nano"
   fi
 }
 
@@ -649,7 +650,7 @@ main() {
 Menu icons created: HEY, HEY Journal, Newsboat, ortop, Media Editor, Dunking Bird,
 JellyTerm, qBittorrent TUI.
 Binaries live in $BIN_DIR (Termux \$PREFIX/bin) — no sudo, no /usr/local/bin.
-fresh-editor + bottom were built from source (snap replacements).
+fresh-editor installed from the Termux package; bottom (btm) built from source.
 fresh-editor is now the default editor (open a new shell, or: source ~/.bashrc).
 
 Termux differences from the Kubuntu build:
