@@ -1,78 +1,85 @@
-# setupkde
+# setupkde (termux branch)
 
+Rebuilds my entire **Termux** environment on a fresh Android device — Claude Code,
+a GPU-accelerated KDE Plasma 6 desktop, and all my TUI apps + menu icons — with one
+command.
 
-Rebuilds my KDE app environment on a fresh Kubuntu machine: installs the
-programs and recreates the KDE menu icons.
+> This is the Termux/Android (aarch64) port. The original Kubuntu version lives on
+> `main`. Several things are fundamentally different here: no root/sudo, no snap, no
+> systemd, `$PREFIX/bin` instead of `/usr/local/bin`, bionic libc.
+
+## Prerequisites (install these yourself first)
+
+1. **Termux** (F-Droid / GitHub build).
+2. **Termux:X11** app (for the KDE desktop display).
+3. **Termux:API** app (device features).
+4. `pkg install git` — to clone this repo.
+
+## Bootstrap
 
 ```bash
-./setup-kde.sh
+git clone https://github.com/huntergdavis/setupkde.git
+cd setupkde
+bash bootstrap.sh
 ```
 
-Safe to re-run — every step is idempotent.
+Runs **unattended** in three phases, each tolerant (warn-and-continue) and re-runnable.
+Skip a phase with `SKIP_CLAUDE=1` / `SKIP_KDE=1` / `SKIP_APPS=1`.
 
-## What it does
+| Phase | Script | What it installs |
+|---|---|---|
+| 1. Claude Code | `stages/10-claude.sh` | Official linux-arm64 `claude` binary patched via **glibc-runner** to run on Android/bionic, with a self-updating wrapper. (from [ferrumclaudepilgrim/claude-code-android](https://github.com/ferrumclaudepilgrim/claude-code-android)) |
+| 2. KDE + GPU | `stages/20-kde.sh` | **KDE Plasma 6** + **Adreno Turnip/Zink** GPU acceleration on Termux-X11. Authored from a hard-won working blueprint; origin [techjarves/Linux-on-Samsung](https://github.com/techjarves/Linux-on-Samsung) (MIT). Ships `~/start-kde` / `~/stop-kde`. |
+| 3. Apps + icons | `setup-kde.sh` | HEY, HEY Journal, Newsboat, ortop, qBittorrent TUI, JellyTerm, Media Editor, Dunking Bird, fresh-editor, bottom + KDE menu entries. |
 
-**Menu icons** (`~/.local/share/applications/`): HEY, HEY Journal, Newsboat,
-ortop, Media Editor, Dunking Bird, JellyTerm, qBittorrent TUI, Motion Cues.
+After it finishes, the bootstrap prints the short list of inherently-manual steps below.
 
-**Programs:** every binary lives in **`/usr/local/bin`** (the one binary
-location). Built artifacts stay in their repo and are symlinked in, so a
-rebuild needs no reinstall. Repos split by ownership: third-party builds go to
-`~/src`, your own (huntergdavis) projects to `~/workspace`.
+## Phase 2 — why KDE needs a custom installer
 
-| Program | Source |
-|---|---|
-| `hey` | built from `basecamp/hey-cli` (`~/src`) → symlink `/usr/local/bin/hey` |
-| `ortop` | built from `huntergdavis/openrouter-tui` (`~/workspace/ortop`) → symlink `/usr/local/bin/ortop` |
-| `qbt-tui` | built from `nickvanw/qbittorrent-tui` (`~/src`) → symlink `/usr/local/bin/qbt-tui` |
-| `newsboat` | built from source (`~/src`) → `make install` to `/usr/local/bin/newsboat` |
-| Media Editor | cloned from `huntergdavis/media` (SSH) → `~/workspace/media` |
-| Dunking Bird | cloned from `huntergdavis/dunkingbird` → `~/workspace/dunkingbird` |
-| JellyTerm | cloned from `huntergdavis/jellyterm` → `~/workspace/jellyterm`; installer runs unattended with default `mpv-terminal` playback and wrapper `/usr/local/bin/jellyterm` |
-| Motion Cues | cloned from `monperrus/motion-cues` (`~/src`) → venv install, wrapper `/usr/local/bin/motion-cues` (forces xcb) |
-| fresh-editor | snap (classic) — also set as the system-wide default editor |
-| duckstation | snap `duckstation-gpl` |
-| firefox, thunderbird, bottom | snaps |
-| claude-desktop | apt repo `pkg.claude-desktop-debian.dev` |
-| rustdesk | latest `.deb` from GitHub releases |
+Stock desktop installers leave you with a broken or software-rendered desktop on
+unrooted Android. `stages/20-kde.sh` encodes the fixes that make it actually work:
 
-**Default editor:** fresh-editor is made the system-wide editor (`EDITOR`,
-`VISUAL`, and the `editor` alternative). Because fresh-editor is a snap that
-dispatches on its invocation name, a wrapper at `/usr/local/bin/fresh` re-execs
-it under the right name so `git`, `crontab`, etc. work. Effective next login.
+- **Turnip Adreno** Vulkan ICD (`mesa-vulkan-icd-freedreno`) — real GPU, not swrast.
+- **`plasma-desktop`** explicitly (plasma-workspace alone = empty desktop).
+- **`libprocesscore.so.10` ABI shim** (version skew vs libksysguard `.so.11`).
+- **Compositing OFF** in `kwinrc` — no DRI3 / no `/dev/dri` on unrooted Android, so
+  kwin's compositor crash-loops; apps still render on the GPU as GLX clients.
+- **kicker + icontasks** panel layout (Kickoff crash-loops this build).
+- HiDPI scaling, GLX-not-EGL, app-menu prefix, kscreen autoload off.
 
-**Dunking Bird** types into the active window via `ydotool`, so the installer
-also pulls in `ydotool`/`xclip`/`xdotool`, adds you to the `input` group
-(re-login required), and on KDE Wayland installs `kdotool` for window
-targeting. Its menu icon runs the repo's own `run_dunking_bird.sh`, which
-starts the ydotool daemon and the TUI.
+GPU env + D-Bus/X11/PulseAudio bring-up live in `~/start-kde`. The stage runs a
+verification pass (Turnip present, plasma shell present, shim present, binaries
+present) and **fails loudly** rather than hiding a software-render fallback.
 
-**Motion Cues** is a PyQt6 system-tray GUI (a Linux port of Apple's Vehicle
-Motion Cues) that drifts peripheral dots to reduce motion sickness. It installs
-into its own venv under `~/src/motion-cues`. It drives X11 ShapeBounding/
-ShapeInput directly, so the `motion-cues` command in `/usr/local/bin` is a thin
-wrapper that forces Qt's `xcb` platform (real X11 client via XWayland on KDE
-Wayland; a no-op on a true X11 session). Forcing it in the command itself means
-`motion-cues` works the same from the terminal as from the menu icon.
+Targets Snapdragon/Adreno (built/tested on a Galaxy Tab S8, Adreno 730). Exynos/Mali
+would need a swrast fallback.
 
-**JellyTerm** uses its own `scripts/install.sh --yes --player mpv-terminal`
-path so the Python venv and `mpv` prerequisite are refreshed without prompts.
+## Phase 3 — apps (`setup-kde.sh`)
 
-Launcher wrappers `hey-journal`, `ortop-gui`, `qbt-tui-gui`, and `jellyterm`
-are written to `/usr/local/bin` too (the menu icons call these). Re-running the
-script also
-cleans up the old layout: any leftover binaries in `~/.local/bin` and the old
-`~/src/openrouter-tui` clone are removed.
+Binaries live in `$PREFIX/bin` (no sudo, no `/usr/local/bin`). Built artifacts stay in
+their repo and are symlinked in. Termux specifics vs. the Kubuntu build:
 
-Override locations with `BUILD_DIR=/path` (upstream builds, default `~/src`)
-or `WORKSPACE_DIR=/path` (personal repos, default `~/workspace`).
+- **Newsboat** and **fresh-editor** install from Termux **packages** (source builds
+  fail on Android: newsboat's vendored gettext, fresh's android-hostile crates).
+- **bottom** builds from source with `--no-default-features` (skips the Android-
+  incompatible battery dep). CPU monitoring can't work (Android blocks `/proc/stat`).
+- **fresh-editor** is the default `EDITOR`/`VISUAL` (set in `~/.bashrc`).
+- **Dunking Bird** auto-type needs `ydotool` (unavailable without root) — installed but
+  the auto-type feature is inert.
+- Dropped: Motion Cues (no PyQt6 wheel), and the Kubuntu-only firefox/thunderbird/
+  duckstation/claude-desktop/rustdesk snaps + systemd NFS mounts.
+- **Tailscale** isn't packaged for Termux — use the official Android app.
 
-## What it deliberately does NOT do
+`setup-kde.sh` can also be run on its own (it assumes phase 2 already installed KDE/konsole).
 
-No keys, logins, or config secrets. After running, set up yourself:
+## Manual steps (printed at the end of bootstrap)
 
-- `~/.config/ortop/env` — OpenRouter API keys (sourced by `ortop-gui`)
-- HEY login — run `hey` and sign in
-- Jellyfin login — run `jellyterm` and sign in
+No keys, logins, or secrets are stored in the repo:
+
+- **Claude:** `claude` then `/login`; `termux-setup-storage`
+- **KDE:** open the Termux:X11 app, then `~/start-kde` (stop: `~/stop-kde`). Log: `~/kde.log`
+- `~/.config/ortop/env` — OpenRouter API keys
+- `~/.config/qbt-tui/env` — qBittorrent WebUI creds
 - `~/.config/newsboat/urls` — FreshRSS endpoint + credentials
-- GitHub SSH key — required to clone the private `huntergdavis/media` repo
+- `hey` / `jellyterm` — run and sign in
+- **GitHub SSH key** — required to clone the private `huntergdavis/media` repo

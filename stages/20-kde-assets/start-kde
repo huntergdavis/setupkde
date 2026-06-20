@@ -1,0 +1,143 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# GPU-accelerated KDE Plasma on Termux-X11.
+# Open the Termux-X11 Android app, then run this script.
+
+set -u
+
+# --- Rolling session log -------------------------------------------------------
+# Everything this session prints (startup messages, kwin/plasmashell warnings,
+# and crash backtraces) is written to ~/kde.log and ALSO shown in the terminal.
+# Rotated each launch so the previous session is kept for comparison:
+#   ~/kde.log (current)  ~/kde.log.1 (previous)  ~/kde.log.2 (older)
+# No need to add "> kde.log" by hand anymore — just run ~/start-kde.
+LOG="$HOME/kde.log"
+[ -f "$LOG.1" ] && mv -f "$LOG.1" "$LOG.2" 2>/dev/null
+[ -f "$LOG" ]   && mv -f "$LOG"   "$LOG.1" 2>/dev/null
+exec > >(stdbuf -oL tee "$LOG") 2>&1
+echo "📝 Session log: $LOG  (previous run: $LOG.1)"
+# ------------------------------------------------------------------------------
+
+# --- XDG paths so .desktop files & icons resolve under Termux prefix ---
+export XDG_DATA_DIRS="/data/data/com.termux/files/usr/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+export XDG_CONFIG_DIRS="/data/data/com.termux/files/usr/etc/xdg:${XDG_CONFIG_DIRS:-/etc/xdg}"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/data/data/com.termux/files/usr/tmp/runtime-$(id -u)}"
+mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
+
+# The app menu only ships as plasma-applications.menu, so Kickoff needs this
+# prefix to find it — without it the application menu comes up EMPTY.
+export XDG_MENU_PREFIX=plasma-
+
+# --- HiDPI scaling ------------------------------------------------------------
+# This panel is 2800px wide reported at 96 DPI, so stock KDE is tiny on the
+# physical screen. KDE_SCALE is the knob: change it and re-run the script.
+#   1.0 = none   1.25   1.5   1.75   2.0 (default, good for this tablet)
+# QT_SCALE_FACTOR scales every Qt/KDE app + the Plasma shell uniformly; it works
+# reliably on Termux-X11 (unlike the GUI "Global Scale", which needs RandR).
+KDE_SCALE="${KDE_SCALE:-2.0}"
+export QT_SCALE_FACTOR="$KDE_SCALE"
+export QT_SCALE_FACTOR_ROUNDING_POLICY=PassThrough   # allow fractional (1.5 etc.)
+export GDK_DPI_SCALE="$KDE_SCALE"                     # scale GTK app fonts to match
+# ------------------------------------------------------------------------------
+
+# --- Cursor theme so kapplymousetheme stops failing (exit 255) ---
+export XCURSOR_PATH="/data/data/com.termux/files/usr/share/icons:${XCURSOR_PATH:-}"
+export XCURSOR_THEME=breeze_cursors
+export XCURSOR_SIZE="$(awk "BEGIN{printf \"%d\", 24*$KDE_SCALE}")"   # cursor tracks scale
+
+# --- GPU: Mesa Zink over Turnip (Adreno hardware acceleration) ---
+export GALLIUM_DRIVER=zink
+export MESA_LOADER_DRIVER_OVERRIDE=zink
+export MESA_GL_VERSION_OVERRIDE=4.6
+export MESA_GLES_VERSION_OVERRIDE=3.2
+export MESA_NO_ERROR=1
+export MESA_VK_WSI_PRESENT_MODE=immediate
+export TU_DEBUG=noconform
+export ZINK_DESCRIPTORS=lazy
+
+# Qt apps + plasmashell render via GLX → hardware Zink/Turnip (NOT software).
+# EGL can't be used: it needs DRI3/pixmap-binding, which Termux-X11 lacks.
+export QT_XCB_GL_INTEGRATION=xcb_glx
+# NOTE: kwin's *compositor* cannot use the GPU on Termux-X11 (needs /dev/dri,
+# blocked by unrooted Android), so it's disabled in ~/.config/kwinrc and kwin
+# runs as a plain window manager. Do NOT set KWIN_COMPOSE — forcing a mode
+# just makes kwin crash-loop trying to composite.
+
+if ! command -v startplasma-x11 >/dev/null 2>&1; then
+  echo "✗ startplasma-x11 not found — KDE isn't installed yet." >&2
+  exit 1
+fi
+if ! command -v termux-x11 >/dev/null 2>&1; then
+  echo "✗ termux-x11 not found — install termux-x11-nightly." >&2
+  exit 1
+fi
+
+# Compat shim: plasma-desktop (6.6.5) links libprocesscore.so.10, but the repo's
+# libksysguard ships .so.11. The ABI surface used by the taskmanager/devicenotifier
+# applets is unchanged, so point .so.10 at the current lib. Self-healing in case an
+# apt upgrade removes it. (Drop this once the two packages are version-matched.)
+_LIBDIR=/data/data/com.termux/files/usr/lib
+if [ ! -e "$_LIBDIR/libprocesscore.so.10" ] && [ -e "$_LIBDIR/libprocesscore.so.11" ]; then
+  ln -sf libprocesscore.so.11 "$_LIBDIR/libprocesscore.so.10"
+fi
+
+echo "🔄 Cleaning up any previous session..."
+pkill -9 -f "termux.x11"   2>/dev/null
+pkill -9 startplasma-x11   2>/dev/null
+pkill -9 kwin_x11          2>/dev/null
+pkill -9 plasmashell       2>/dev/null
+pkill -9 upowerd           2>/dev/null
+pkill -9 -f dbus-daemon    2>/dev/null
+pkill -9 dbus-launch       2>/dev/null
+sleep 1
+
+# --- System D-Bus: clears the "Failed to get connection to system bus" errors.
+#     NOTE: UPower/battery can't work — Android blocks /sys/class/power_supply
+#     (like /dev/dri), so upowerd exits immediately. Power-management warnings
+#     from powerdevil/kscreen are therefore expected and harmless. ---
+echo "🔌 Starting system D-Bus..."
+mkdir -p /data/data/com.termux/files/usr/var/run/dbus
+if ! dbus-send --system --dest=org.freedesktop.DBus --print-reply / \
+       org.freedesktop.DBus.GetId >/dev/null 2>&1; then
+  rm -f /data/data/com.termux/files/usr/var/run/dbus/pid \
+        /data/data/com.termux/files/usr/var/run/dbus/system_bus_socket 2>/dev/null
+  dbus-daemon --system --fork 2>/dev/null   # "Unknown username pulse" note is harmless
+  sleep 1
+fi
+
+echo "🔊 Starting PulseAudio..."
+unset PULSE_SERVER
+pulseaudio --kill 2>/dev/null
+sleep 0.5
+pulseaudio --start --exit-idle-time=-1
+pactl load-module module-native-protocol-tcp \
+  auth-ip-acl=127.0.0.1 auth-anonymous=1 >/dev/null 2>&1
+export PULSE_SERVER=127.0.0.1
+
+echo "📺 Starting Termux-X11 display server on :0..."
+termux-x11 :0 -ac >/dev/null 2>&1 &
+sleep 3
+export DISPLAY=:0
+
+echo "🚌 Starting D-Bus session bus..."
+# KDE Plasma requires a session bus. Without it you get a flood of
+# "Failed to register", "Could not connect to D-Bus", "invalid path" errors.
+eval "$(dbus-launch --sh-syntax)"
+export DBUS_SESSION_BUS_ADDRESS DBUS_SESSION_BUS_PID
+# Push the env KDE's activated services need into the bus.
+dbus-update-activation-environment --systemd \
+  DISPLAY XDG_RUNTIME_DIR XDG_DATA_DIRS XDG_CONFIG_DIRS XDG_MENU_PREFIX PULSE_SERVER \
+  GALLIUM_DRIVER MESA_LOADER_DRIVER_OVERRIDE ZINK_DESCRIPTORS \
+  QT_XCB_GL_INTEGRATION MESA_GL_VERSION_OVERRIDE MESA_GLES_VERSION_OVERRIDE \
+  QT_SCALE_FACTOR QT_SCALE_FACTOR_ROUNDING_POLICY GDK_DPI_SCALE \
+  XCURSOR_PATH XCURSOR_THEME XCURSOR_SIZE >/dev/null 2>&1
+
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "  📱  Open the Termux-X11 app now to see KDE"
+echo "  🎮  GPU: Zink/Turnip (Adreno HW accel)"
+echo "  🔊  Audio: PulseAudio on 127.0.0.1"
+echo "  🛑  To stop:  ~/stop-kde"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+
+exec startplasma-x11
