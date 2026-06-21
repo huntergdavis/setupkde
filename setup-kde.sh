@@ -2,14 +2,24 @@
 #
 # setup-kde.sh — rebuild Hunter's KDE app environment on a fresh machine.
 #
+# ONE script, TWO platforms. The shared logic (source builds, launcher wrappers,
+# KDE menu icons, legacy cleanup, orchestration) lives here; everything that
+# genuinely differs between a Kubuntu laptop and Termux/Android is isolated in a
+# platform profile under lib/:
+#
+#   lib/platform-linux.sh   — Kubuntu/Debian: sudo, /usr/local/bin, apt + snap,
+#                             rustup, /etc/environment, systemd NFS automounts.
+#   lib/platform-termux.sh  — Termux/Android (aarch64): no root/sudo, $PREFIX/bin,
+#                             pkg/apt only, system rust, ~/.bashrc, no snap/systemd.
+#
+# The profile is auto-detected (override with PLATFORM=linux|termux) and sourced
+# before anything runs. It must define the vars BIN_DIR / SUDO / BASH_SHEBANG /
+# FRESH_PATH and the p_* hook functions called by main() below.
+#
 # Installs the programs and creates the KDE menu icons for:
 #   HEY, HEY Journal, Newsboat, ortop, Media Editor, Dunking Bird,
-#   JellyTerm, qBittorrent TUI, Motion Cues, fresh-editor
-# plus the other apps installed by hand (duckstation, claude-desktop,
-# rustdesk, tailscale, firefox/thunderbird/bottom snaps).
-#
-# It also makes fresh-editor the system-wide default editor (EDITOR/VISUAL
-# and the `editor` alternative) via a wrapper, so git/crontab/hey all use it.
+#   JellyTerm, qBittorrent TUI (+ Motion Cues / fresh-editor / bottom where the
+#   platform supports them).
 #
 # This script does NOT copy keys, tokens, logins, or config secrets.
 # After running it you still need to provide, yourself:
@@ -24,22 +34,41 @@
 #
 # Safe to re-run: every step checks whether the work is already done.
 #
+# NOTE: on Termux invoke as `bash setup-kde.sh` (bootstrap.sh does this) — the
+# #!/usr/bin/env shebang has no /usr/bin/env to resolve there.
+#
 set -euo pipefail
 
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"  # this repo (ships the qbt icon)
+
+# ---------------------------------------------------------------------------
+# Platform profile (auto-detected; override with PLATFORM=linux|termux)
+# ---------------------------------------------------------------------------
+if [ -z "${PLATFORM:-}" ]; then
+  if [ -n "${TERMUX_VERSION:-}" ] || [ -d /data/data/com.termux ]; then
+    PLATFORM=termux
+  else
+    PLATFORM=linux
+  fi
+fi
+PLATFORM_LIB="$SCRIPT_DIR/lib/platform-$PLATFORM.sh"
+[ -r "$PLATFORM_LIB" ] || {
+  echo "setup-kde.sh: no platform profile for '$PLATFORM' (expected $PLATFORM_LIB)" >&2
+  exit 1
+}
+# shellcheck source=/dev/null
+. "$PLATFORM_LIB"   # defines BIN_DIR, SUDO, BASH_SHEBANG, FRESH_PATH and the p_* hooks
+
+# ---------------------------------------------------------------------------
+# Shared config (the "what/where"; the profile decides the "how")
+# ---------------------------------------------------------------------------
 # Two repo roots, split by ownership (not by build system):
 #   BUILD_DIR     — third-party upstream repos (hey-cli, qbittorrent-tui, newsboat)
 #   WORKSPACE_DIR — your own (huntergdavis) projects (ortop, media, dunkingbird, jellyterm)
 BUILD_DIR="${BUILD_DIR:-$HOME/src}"
 WORKSPACE_DIR="${WORKSPACE_DIR:-$HOME/workspace}"
-# The one place binaries live. Built artifacts stay in their repo and are
-# symlinked in here, so /usr/local/bin is the single PATH entry that matters
-# and a rebuild is picked up with no stale copy. No ~/.local/bin anywhere.
-BIN_DIR="/usr/local/bin"
 APPS_DIR="$HOME/.local/share/applications"   # XDG per-user menu entries (not binaries)
+CARGO_ROOT="$BUILD_DIR/cargo"                 # where `cargo install` lands (then symlinked)
 
 HEY_REPO="https://github.com/basecamp/hey-cli.git"
 ORTOP_REPO="https://github.com/huntergdavis/openrouter-tui.git"
@@ -50,21 +79,10 @@ MEDIA_REPO="git@github.com:huntergdavis/media.git"   # private; needs your GitHu
 MEDIA_DIR="$WORKSPACE_DIR/media"
 DUNKING_REPO="https://github.com/huntergdavis/dunkingbird.git"   # public
 DUNKING_DIR="$WORKSPACE_DIR/dunkingbird"
-MOTION_CUES_REPO="https://github.com/monperrus/motion-cues.git"   # public, third-party
+MOTION_CUES_REPO="https://github.com/monperrus/motion-cues.git"   # public, third-party (Linux only)
 MOTION_CUES_DIR="$BUILD_DIR/motion-cues"
 JELLYTERM_REPO="https://github.com/huntergdavis/jellyterm.git"   # public
 JELLYTERM_DIR="$WORKSPACE_DIR/jellyterm"
-
-# NFS shares exported by monkeydluffy (192.168.0.238). Mounted read-write for
-# grsync. Each entry is "server_export|local_mountpoint".
-NFS_SERVER="192.168.0.238"
-NFS_MOUNTS=(
-  "/media/hunter/EasyStore18gb|/mnt/monkeydluffy/treasure"
-  "/media/hunter/Expansion28tb|/mnt/monkeydluffy/more_treasure"
-)
-
-# Path of the fresh-editor wrapper that fixes snap's argv[0] dispatch (see below).
-FRESH_WRAPPER="/usr/local/bin/fresh"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -76,13 +94,14 @@ have() { command -v "$1" >/dev/null 2>&1; }
 
 # Symlink a built binary into BIN_DIR. -f replaces a prior copy/symlink (so an
 # old `install`-ed file migrates to a symlink); -n avoids descending into an
-# existing symlinked dir. Centralizes the "one binary location" rule.
+# existing symlinked dir. $SUDO is empty on Termux ($PREFIX/bin is user-owned)
+# and "sudo" on Linux (/usr/local/bin needs root).
 link_bin() {
   local src="$1" name="${2:-$(basename "$1")}"
-  sudo ln -sfn "$src" "$BIN_DIR/$name"
+  $SUDO ln -sfn "$src" "$BIN_DIR/$name"
 }
 
-# Clone if missing, otherwise pull latest. Echoes the repo dir.
+# Clone if missing, otherwise pull latest.
 clone_or_update() {
   local url="$1" dir="$2"
   if [ -d "$dir/.git" ]; then
@@ -94,41 +113,23 @@ clone_or_update() {
   fi
 }
 
-mkdir -p "$BUILD_DIR" "$WORKSPACE_DIR" "$APPS_DIR"   # BIN_DIR (/usr/local/bin) already exists
-
-# ---------------------------------------------------------------------------
-# 1. apt build dependencies + toolchains
-# ---------------------------------------------------------------------------
-install_build_deps() {
-  say "Installing build toolchains and dependencies (apt)"
-  sudo apt-get update -qq
-  # cargo/rustc from apt are often too old for recent crates (e.g. newsboat
-  # requires resolver = "3" which needs cargo 1.84+). We install via rustup
-  # below and skip the apt rust packages.
-  sudo apt-get install -y \
-    build-essential pkg-config git curl ca-certificates gnupg \
-    golang-go gettext asciidoctor \
-    libstfl-dev libsqlite3-dev libcurl4-openssl-dev \
-    libncurses-dev libxml2-dev libdbus-1-dev libjson-c-dev \
-    python3 python3-venv python3-pip \
-    ydotool xclip xdotool \
-    konsole snapd
-
-  # Install rustup (provides up-to-date cargo/rustc) if not already present.
-  if ! command -v rustup >/dev/null 2>&1; then
-    say "Installing rustup (stable Rust toolchain)"
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
-  fi
-  # Ensure cargo is on PATH for the remainder of this script run.
-  # shellcheck source=/dev/null
-  [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+# Write an executable launcher to $1 with the platform's shebang, reading the
+# script body from stdin (heredoc). Quoted heredocs keep the body literal;
+# unquoted ones let $FRESH_PATH etc. expand at write time. $SUDO handles the
+# Linux /usr/local/bin permissions; it's empty on Termux.
+write_launcher() {
+  local dest="$1"
+  { printf '%s\n' "$BASH_SHEBANG"; cat; } | $SUDO tee "$dest" >/dev/null
+  $SUDO chmod 0755 "$dest"
 }
 
+mkdir -p "$BUILD_DIR" "$WORKSPACE_DIR" "$APPS_DIR"   # BIN_DIR already exists on both platforms
+
 # ---------------------------------------------------------------------------
-# 2. Source builds: hey, ortop, newsboat
+# Source builds shared by both platforms: hey, ortop, qbt-tui
 # ---------------------------------------------------------------------------
 build_hey() {
-  say "Building HEY (hey-cli) -> /usr/local/bin/hey"
+  say "Building HEY (hey-cli) -> $BIN_DIR/hey"
   if have hey; then info "hey already on PATH; rebuilding to update"; fi
   local dir="$BUILD_DIR/hey-cli"
   clone_or_update "$HEY_REPO" "$dir"
@@ -155,13 +156,6 @@ build_qbt_tui() {
   clone_or_update "$QBT_TUI_REPO" "$dir"
   ( cd "$dir" && go build -o qbt-tui ./cmd/qbt-tui )
   link_bin "$dir/qbt-tui" qbt-tui
-}
-
-build_newsboat() {
-  say "Building Newsboat -> /usr/local/bin/newsboat"
-  local dir="$BUILD_DIR/newsboat"
-  clone_or_update "$NEWSBOAT_REPO" "$dir"
-  ( cd "$dir" && make -j"$(nproc)" && sudo make install )   # installs under /usr/local
 }
 
 # Media Editor: a personal Textual TUI for editing markdown collection tables.
@@ -204,9 +198,9 @@ install_media() {
 
 # Dunking Bird: a personal Textual/curses TUI that types a prompt into the
 # active window every X seconds (drives input via ydotool). Public repo.
-# The menu icon launches its own run_dunking_bird.sh, which starts the ydotool
-# daemon and the TUI; the apt step above provides ydotool/xclip/xdotool so the
-# launcher's prerequisite checks pass on a fresh machine.
+# The platform hook p_dunkingbird_input handles the input backend (the `input`
+# group on Linux; a "no ydotool on Android" warning on Termux). kdotool (KDE
+# Wayland window targeting) is built the same way on both platforms.
 install_dunkingbird() {
   say "Installing Dunking Bird (dunkingbird) -> $DUNKING_DIR"
   clone_or_update "$DUNKING_REPO" "$DUNKING_DIR"
@@ -225,220 +219,55 @@ install_dunkingbird() {
     fi
   fi
 
-  # ydotool needs the invoking user in the `input` group (re-login to apply).
-  # The launcher starts ydotoold itself (via sudo) at run time.
-  if ! id -nG "$USER" | tr ' ' '\n' | grep -qx input; then
-    info "adding $USER to the input group (for ydotool; re-login to take effect)"
-    sudo usermod -aG input "$USER" || warn "could not add $USER to the input group"
-  fi
+  p_dunkingbird_input   # input group (Linux) / ydotool-unavailable warning (Termux)
 
   # kdotool: window capture/focus backend used on KDE Wayland (best-effort).
   # cargo can't write to /usr/local/bin without sudo, so build it into a cargo
   # root under BUILD_DIR and symlink the binary into BIN_DIR like everything else.
   if [ "${XDG_SESSION_TYPE:-}" = "wayland" ] && ! have kdotool; then
     info "installing kdotool (KDE Wayland window backend)"
-    if cargo install --git https://github.com/jinliu/kdotool --root "$BUILD_DIR/cargo"; then
-      link_bin "$BUILD_DIR/cargo/bin/kdotool" kdotool
+    if cargo install --git https://github.com/jinliu/kdotool --root "$CARGO_ROOT"; then
+      link_bin "$CARGO_ROOT/bin/kdotool" kdotool
     else
       warn "could not install kdotool; window targeting may be limited on KDE Wayland"
     fi
   fi
 }
 
-# Motion Cues: a Linux port of Apple's Vehicle Motion Cues (iOS 18 / macOS 15).
-# A PyQt6 GUI app that drifts peripheral dots matching vehicle motion to reduce
-# motion sickness while using a laptop in a car. Third-party Python package, so
-# we install it into its own venv (like media/dunkingbird). It lives in the
-# system tray (not a TUI), so its menu icon launches it directly with no terminal.
-#
-# Rather than symlink the venv entry point straight into BIN_DIR, the `motion-cues`
-# command in BIN_DIR is a thin wrapper: the app drives X11 ShapeBounding/ShapeInput
-# directly on its own window, which fails under a native Wayland Qt platform
-# (winId() is a Wayland surface, not an X window). The wrapper forces Qt's xcb
-# platform so it runs as a real X11 client via XWayland on KDE Wayland; harmless on
-# a true X11 session. Baking it into the command itself means `motion-cues` works
-# the same from the terminal as from the menu icon.
-install_motion_cues() {
-  say "Installing Motion Cues (motion-cues) -> venv + $BIN_DIR/motion-cues"
-  # Runtime X11 libs the PyQt6 overlay needs (XWayland on Wayland sessions).
-  sudo apt-get install -y libx11-6 libxext6
-  clone_or_update "$MOTION_CUES_REPO" "$MOTION_CUES_DIR"
-
-  if [ ! -d "$MOTION_CUES_DIR/venv" ]; then
-    info "creating venv"
-    if ! python3 -m venv "$MOTION_CUES_DIR/venv"; then
-      rm -rf "$MOTION_CUES_DIR/venv"
-      warn "venv creation failed; skipping Motion Cues"
-      return 0
-    fi
-  fi
-  "$MOTION_CUES_DIR/venv/bin/pip" install --quiet --upgrade pip
-  # Install the cloned repo (pulls in PyQt6); editable so a `git pull` is live.
-  if ! "$MOTION_CUES_DIR/venv/bin/pip" install --quiet -e "$MOTION_CUES_DIR"; then
-    warn "pip install of motion-cues failed (PyQt6 may lack a wheel for this Python); skipping"
-    return 0
-  fi
-
-  # The `motion-cues` command itself forces the xcb platform (XWayland fallback),
-  # so it works identically from the terminal and from the menu icon.
-  # rm first: earlier versions symlinked this to the venv binary, and `tee`
-  # would otherwise follow that symlink and overwrite the venv entry point.
-  sudo rm -f "$BIN_DIR/motion-cues"
-  sudo tee "$BIN_DIR/motion-cues" >/dev/null <<EOF
-#!/usr/bin/env bash
-# Wrapper for the Motion Cues venv install.
-# Motion Cues drives X11 ShapeBounding/ShapeInput directly on its own window.
-# Under a native Wayland Qt platform, winId() is a Wayland surface (not an X
-# window), so those Xlib SHAPE calls fail with BadWindow. Forcing Qt's xcb
-# platform makes it a real X11 client via XWayland with a valid window id.
-# Harmless on a true X11 session, where xcb is already the default.
-export QT_QPA_PLATFORM="\${QT_QPA_PLATFORM:-xcb}"
-exec "$MOTION_CUES_DIR/venv/bin/motion-cues" "\$@"
-EOF
-  sudo chmod 0755 "$BIN_DIR/motion-cues"
-}
-
 # JellyTerm: a terminal Jellyfin browser/player. Its own installer manages the
-# Python venv and OS player prerequisites; --yes keeps setup-kde unattended.
+# Python venv and OS player prerequisites. The platform hook p_jellyterm_install
+# runs that installer the platform's way (Termux needs shebang fixups + bash +
+# --skip-system-packages because the OS-package path uses sudo).
 install_jellyterm() {
   say "Installing JellyTerm (jellyterm) -> $JELLYTERM_DIR"
   clone_or_update "$JELLYTERM_REPO" "$JELLYTERM_DIR"
   chmod 0755 "$JELLYTERM_DIR/scripts/install.sh" "$JELLYTERM_DIR/scripts/run.sh" 2>/dev/null || true
-
-  if [ -x "$JELLYTERM_DIR/scripts/install.sh" ]; then
-    ( cd "$JELLYTERM_DIR" && ./scripts/install.sh --yes --player mpv-terminal )
-  else
-    warn "skipping JellyTerm install (installer not present at $JELLYTERM_DIR/scripts/install.sh)"
-  fi
+  p_jellyterm_install "$JELLYTERM_DIR"
 }
 
 # ---------------------------------------------------------------------------
-# 3. Snaps: fresh-editor, duckstation, and the rest
-# ---------------------------------------------------------------------------
-install_snaps() {
-  say "Installing snaps"
-  snap_install() {
-    local name="$1"; shift
-    if snap list 2>/dev/null | awk '{print $1}' | grep -qx "$name"; then
-      info "$name already installed"
-    else
-      info "installing $name"
-      sudo snap install "$name" "$@"
-    fi
-  }
-  snap_install fresh-editor --classic     # required by HEY Journal (EDITOR)
-  snap_install duckstation-gpl
-  snap_install firefox
-  snap_install thunderbird
-  snap_install bottom
-}
-
-# ---------------------------------------------------------------------------
-# 3b. Make fresh-editor the system-wide default editor
-# ---------------------------------------------------------------------------
-# /snap/bin/fresh-editor symlinks to /usr/bin/snap, and snap chooses which app
-# to run from the basename it's invoked as. Tools that call the editor as
-# "editor" (git, crontab) would therefore run snap *as* "editor" and fail with
-# `unknown command ...`. A tiny wrapper that always re-execs fresh-editor under
-# its real name fixes this; we point EDITOR/VISUAL and the `editor` alternative
-# at the wrapper.
-set_default_editor() {
-  say "Making fresh-editor the system-wide default editor"
-
-  sudo tee "$FRESH_WRAPPER" >/dev/null <<'EOF'
-#!/bin/sh
-# Wrapper for the fresh-editor snap.
-# Snap dispatches by argv[0] basename, so it must be invoked as "fresh-editor".
-# Tools that call it as "editor" (git, crontab, etc.) break without this.
-exec /snap/bin/fresh-editor "$@"
-EOF
-  sudo chmod 0755 "$FRESH_WRAPPER"
-
-  # `editor` alternative (used by sensible-editor and as git's last-resort editor).
-  sudo update-alternatives --install /usr/bin/editor editor "$FRESH_WRAPPER" 200
-  sudo update-alternatives --set editor "$FRESH_WRAPPER"
-
-  # EDITOR/VISUAL for all login + GUI sessions (pam_env reads /etc/environment).
-  # Idempotent: strip any prior lines first. Takes effect on next login.
-  sudo sed -i '/^EDITOR=/d;/^VISUAL=/d' /etc/environment
-  printf 'EDITOR="%s"\nVISUAL="%s"\n' "$FRESH_WRAPPER" "$FRESH_WRAPPER" | sudo tee -a /etc/environment >/dev/null
-  info "EDITOR/VISUAL -> $FRESH_WRAPPER (takes effect on next login)"
-}
-
-# ---------------------------------------------------------------------------
-# 4. apt apps from extra repos / releases
-# ---------------------------------------------------------------------------
-install_claude_desktop() {
-  say "Installing claude-desktop (pkg.claude-desktop-debian.dev)"
-  if dpkg -s claude-desktop >/dev/null 2>&1; then
-    info "claude-desktop already installed"; return
-  fi
-  local key=/usr/share/keyrings/claude-desktop.gpg
-  local key_url=https://pkg.claude-desktop-debian.dev/KEY.gpg
-  local list=/etc/apt/sources.list.d/claude-desktop.list
-  if [ ! -s "$key" ] || ! gpg --quiet --show-keys "$key" >/dev/null 2>&1; then
-    info "fetching signing key"
-    sudo rm -f "$key"
-    curl -fsSL "$key_url" \
-      | sudo gpg --dearmor --yes -o "$key" \
-      || { warn "could not fetch claude-desktop key; skipping. See https://github.com/aaddrick/claude-desktop-debian"; return; }
-  fi
-  echo "deb [signed-by=$key arch=amd64,arm64] https://pkg.claude-desktop-debian.dev stable main" \
-    | sudo tee "$list" >/dev/null
-  sudo apt-get update -qq
-  sudo apt-get install -y claude-desktop
-}
-
-install_rustdesk() {
-  say "Installing rustdesk (latest .deb from GitHub releases)"
-  if dpkg -s rustdesk >/dev/null 2>&1; then
-    info "rustdesk already installed"; return
-  fi
-  local url
-  url=$(curl -fsSL https://api.github.com/repos/rustdesk/rustdesk/releases/latest \
-        | grep -oE 'https://[^"]*x86_64\.deb' | head -1)
-  if [ -z "$url" ]; then
-    warn "could not find a rustdesk .deb asset; skipping. See https://github.com/rustdesk/rustdesk/releases"
-    return
-  fi
-  local deb="$BUILD_DIR/$(basename "$url")"
-  info "downloading $(basename "$url")"
-  curl -fsSL -o "$deb" "$url"
-  sudo apt-get install -y "$deb"
-}
-
-install_tailscale() {
-  say "Installing Tailscale"
-  if have tailscale; then info "tailscale already installed"; return; fi
-  curl -fsSL https://tailscale.com/install.sh | sh
-}
-
-# ---------------------------------------------------------------------------
-# 5. Wrapper scripts (recreated verbatim)
+# Launcher wrapper scripts (shared; platform shebang via write_launcher)
 # ---------------------------------------------------------------------------
 install_wrappers() {
   say "Installing launcher wrapper scripts -> $BIN_DIR"
 
-  sudo tee "$BIN_DIR/hey-journal" >/dev/null <<'EOF'
-#!/usr/bin/env bash
+  write_launcher "$BIN_DIR/hey-journal" <<EOF
 # Launcher wrapper for the "HEY Journal" KDE menu entry.
-# `hey journal write` opens $EDITOR; GUI launches don't always have it set,
+# \`hey journal write\` opens \$EDITOR; GUI launches don't always have it set,
 # so guarantee fresh-editor is used (falls back to any EDITOR already set).
-export EDITOR="${EDITOR:-/usr/local/bin/fresh}"
-export VISUAL="${VISUAL:-$EDITOR}"
-exec hey journal write "$@"
+export EDITOR="\${EDITOR:-$FRESH_PATH}"
+export VISUAL="\${VISUAL:-\$EDITOR}"
+exec hey journal write "\$@"
 EOF
 
-  sudo tee "$BIN_DIR/ortop-gui" >/dev/null <<'EOF'
-#!/usr/bin/env bash
+  write_launcher "$BIN_DIR/ortop-gui" <<'EOF'
 # Launcher wrapper for the ortop KDE menu entry.
 # GUI launches don't source ~/.bashrc, so load the OpenRouter keys explicitly.
 . "$HOME/.config/ortop/env" 2>/dev/null
 exec ortop "$@"
 EOF
 
-  sudo tee "$BIN_DIR/qbt-tui-gui" >/dev/null <<'EOF'
-#!/usr/bin/env bash
+  write_launcher "$BIN_DIR/qbt-tui-gui" <<'EOF'
 # Launcher wrapper for the qbt-tui KDE menu entry.
 # GUI launches don't source ~/.bashrc, so set the (non-secret) server URL here
 # and load the qBittorrent WebUI credentials from a separate env file.
@@ -448,18 +277,15 @@ exec qbt-tui "$@"
 EOF
 
   if [ -f "$JELLYTERM_DIR/scripts/run.sh" ]; then
-    sudo tee "$BIN_DIR/jellyterm" >/dev/null <<EOF
-#!/usr/bin/env bash
+    write_launcher "$BIN_DIR/jellyterm" <<EOF
 # Launcher wrapper for JellyTerm. Keep this as a wrapper, not a symlink to
 # scripts/run.sh, so the project root stays stable when invoked from PATH.
 exec "$JELLYTERM_DIR/scripts/run.sh" "\$@"
 EOF
-    sudo chmod 0755 "$BIN_DIR/jellyterm"
   else
     warn "skipping JellyTerm PATH wrapper (runner not present at $JELLYTERM_DIR/scripts/run.sh)"
   fi
 
-  sudo chmod 0755 "$BIN_DIR/hey-journal" "$BIN_DIR/ortop-gui" "$BIN_DIR/qbt-tui-gui"
   if [ ! -f "$HOME/.config/ortop/env" ]; then
     warn "ortop needs ~/.config/ortop/env with your OpenRouter keys (not created by this script)"
   fi
@@ -481,7 +307,9 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# 6. KDE menu icons (.desktop entries)
+# KDE menu icons (.desktop entries) — shared; every optional app self-gates on
+# whether its repo/binary actually installed, so the Motion Cues entry (Linux
+# only) simply never appears on Termux.
 # ---------------------------------------------------------------------------
 install_desktop_entries() {
   say "Creating KDE menu icons -> $APPS_DIR"
@@ -570,7 +398,7 @@ EOF
 
   chmod 0644 "$APPS_DIR"/{hey,hey-journal,newsboat,ortop,qbt-tui}.desktop
 
-  # JellyTerm — launches through the /usr/local/bin wrapper so it is also on PATH.
+  # JellyTerm — launches through the BIN_DIR wrapper so it is also on PATH.
   if [ -f "$JELLYTERM_DIR/scripts/run.sh" ]; then
     cat > "$APPS_DIR/jellyterm.desktop" <<EOF
 [Desktop Entry]
@@ -634,8 +462,9 @@ EOF
     warn "skipping Dunking Bird menu icon (repo not present at $DUNKING_DIR)"
   fi
 
-  # Motion Cues — a PyQt6 system-tray GUI (not a TUI), so launch it directly
-  # with no terminal. Only wire up if the venv entry point actually installed.
+  # Motion Cues — a PyQt6 system-tray GUI (Linux only; Termux has no PyQt6 wheel,
+  # so the venv binary never exists there and this block is skipped). Launches
+  # directly with no terminal.
   if [ -x "$MOTION_CUES_DIR/venv/bin/motion-cues" ]; then
     cat > "$APPS_DIR/motion-cues.desktop" <<EOF
 [Desktop Entry]
@@ -662,47 +491,11 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# 7. NFS mounts from monkeydluffy (for grsync)
-# ---------------------------------------------------------------------------
-# The drives "treasure" and "more treasure" live on monkeydluffy and are
-# exported over NFS (faster than SMB for Linux<->Linux). We mount them via
-# /etc/fstab using systemd automount so they:
-#   - survive reboot,
-#   - mount on first access (don't block boot), and
-#   - don't hang the machine if the server or a USB drive is offline (nofail).
-# This is the client side only; the NFS server config lives on monkeydluffy.
-install_nfs_mounts() {
-  say "Mounting monkeydluffy NFS shares (for grsync)"
-  sudo apt-get install -y nfs-common
-
-  local changed=0 export_path mountpoint line
-  for entry in "${NFS_MOUNTS[@]}"; do
-    export_path="${entry%%|*}"
-    mountpoint="${entry##*|}"
-    sudo mkdir -p "$mountpoint"
-    line="$NFS_SERVER:$export_path  $mountpoint  nfs  _netdev,nofail,x-systemd.automount,x-systemd.idle-timeout=600,noatime  0  0"
-    if grep -qF " $mountpoint " /etc/fstab; then
-      info "fstab entry for $mountpoint already present"
-    else
-      info "adding fstab entry for $mountpoint"
-      echo "$line" | sudo tee -a /etc/fstab >/dev/null
-      changed=1
-    fi
-  done
-
-  if [ "$changed" = 1 ]; then
-    sudo systemctl daemon-reload
-    sudo mount -a || warn "mount -a reported an error; check 'showmount -e $NFS_SERVER'"
-  fi
-  info "shares will mount on first access under /mnt/monkeydluffy/"
-}
-
-# ---------------------------------------------------------------------------
-# 0. Migrate off the old split layout (~/.local/bin, ~/src/openrouter-tui)
+# Migrate off the old split layout (~/.local/bin, ~/src/openrouter-tui)
 # ---------------------------------------------------------------------------
 # Earlier versions installed some binaries to ~/.local/bin and cloned ortop to
-# ~/src/openrouter-tui. Ubuntu puts ~/.local/bin *ahead* of /usr/local/bin on
-# PATH, so a leftover copy there would shadow the new symlink — remove them.
+# ~/src/openrouter-tui. ~/.local/bin can sit *ahead* of BIN_DIR on PATH, so a
+# leftover copy there would shadow the new symlink — remove them.
 cleanup_legacy_layout() {
   say "Cleaning up legacy ~/.local/bin and old ortop clone"
   local b
@@ -722,46 +515,28 @@ cleanup_legacy_layout() {
 # Run
 # ---------------------------------------------------------------------------
 main() {
-  install_build_deps
+  p_build_deps            # platform: apt+rustup (Linux) / pkg (Termux)
   cleanup_legacy_layout
 
   build_hey
   build_ortop
   build_qbt_tui
-  build_newsboat
+  p_newsboat              # platform: source build (Linux) / Termux package
   install_media
   install_dunkingbird
   install_jellyterm
-  install_motion_cues
 
-  install_snaps
-  set_default_editor
-  install_claude_desktop
-  install_rustdesk
-  install_tailscale
+  p_fresh_editor          # platform: snap (Linux) / Termux package
+  p_extra_apps            # platform: snaps+duckstation+claude-desktop+rustdesk+motion-cues (Linux) / bottom (Termux)
+  p_default_editor        # platform: /etc/environment + alternatives (Linux) / ~/.bashrc (Termux)
+  p_vpn                   # platform: tailscale install (Linux) / package-or-Android-app note (Termux)
 
   install_wrappers
   install_desktop_entries
-  install_nfs_mounts
+  p_mounts                # platform: systemd NFS automounts (Linux) / no-op (Termux)
 
   say "Done."
-  cat <<EOF
-
-Menu icons created: HEY, HEY Journal, Newsboat, ortop, Media Editor, Dunking Bird,
-JellyTerm, qBittorrent TUI, Motion Cues.
-Tailscale installed (run: sudo tailscale up   to authenticate and connect).
-NFS shares from monkeydluffy mounted at /mnt/monkeydluffy/{treasure,more_treasure}
-(systemd automount; survives reboot, mounts on first access).
-fresh-editor is now the system-wide default editor (effective next login).
-Dunking Bird needs the 'input' group for ydotool — re-login if it was just added.
-Still up to you (secrets — intentionally not handled here):
-  - ~/.config/ortop/env   OpenRouter API keys
-  - ~/.config/qbt-tui/env qBittorrent WebUI username+password (or api_key)
-  - HEY login             run: hey   (and sign in)
-  - Jellyfin login        run: jellyterm   (and sign in)
-  - ~/.config/newsboat/urls   your FreshRSS endpoint + credentials
-  - GitHub SSH key        needed to clone the private media repo
-EOF
+  p_final_notes
 }
 
 main "$@"

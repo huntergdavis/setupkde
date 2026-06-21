@@ -1,0 +1,15 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# Stop KDE Plasma + Termux-X11 cleanly.
+
+echo "🛑 Stopping KDE session..."
+pkill -9 startplasma-x11 2>/dev/null
+pkill -9 plasma_session  2>/dev/null
+pkill -9 kwin_x11        2>/dev/null
+pkill -9 plasmashell     2>/dev/null
+pkill -9 ksmserver       2>/dev/null
+pkill -9 upowerd         2>/dev/null
+pkill -9 -f "termux.x11" 2>/dev/null
+pkill -9 dbus-launch     2>/dev/null
+pkill -9 -f dbus-daemon  2>/dev/null
+pulseaudio --kill        2>/dev/null
+echo "✓ Stopped."
