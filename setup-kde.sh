@@ -1,27 +1,25 @@
-#!/data/data/com.termux/files/usr/bin/bash
+#!/usr/bin/env bash
 #
-# setup-kde.sh — rebuild Hunter's KDE app environment (TERMUX edition).
+# setup-kde.sh — rebuild Hunter's KDE app environment on a fresh machine.
 #
-# This is the Termux/Android port of the original Kubuntu script. Termux is an
-# unprivileged Android app, so the environment is fundamentally different:
-#   - NO root / NO sudo            -> everything installs into $PREFIX (user-owned)
-#   - NO /usr/local/bin            -> the one binary dir is $PREFIX/bin
-#   - NO snap / snapd              -> snap apps come from pkg, source, or dropped
-#   - NO systemd                   -> the NFS automount step is gone
-#   - aarch64 (bionic libc)        -> glibc/x86_64 .deb apps can't run here
-#   - KDE Plasma 6 + konsole are already installed (and version-pinned), so we
-#     never reinstall them — installing only named build deps avoids disturbing
-#     the pinned kf6/qt6 libraries.
+# ONE script, TWO platforms. The shared logic (source builds, launcher wrappers,
+# KDE menu icons, legacy cleanup, orchestration) lives here; everything that
+# genuinely differs between a Kubuntu laptop and Termux/Android is isolated in a
+# platform profile under lib/:
+#
+#   lib/platform-linux.sh   — Kubuntu/Debian: sudo, /usr/local/bin, apt + snap,
+#                             rustup, /etc/environment, systemd NFS automounts.
+#   lib/platform-termux.sh  — Termux/Android (aarch64): no root/sudo, $PREFIX/bin,
+#                             pkg/apt only, system rust, ~/.bashrc, no snap/systemd.
+#
+# The profile is auto-detected (override with PLATFORM=linux|termux) and sourced
+# before anything runs. It must define the vars BIN_DIR / SUDO / BASH_SHEBANG /
+# FRESH_PATH and the p_* hook functions called by main() below.
 #
 # Installs the programs and creates the KDE menu icons for:
 #   HEY, HEY Journal, Newsboat, ortop, Media Editor, Dunking Bird,
-#   JellyTerm, qBittorrent TUI, plus fresh-editor + bottom.
-#
-# It also makes fresh-editor the default editor (EDITOR/VISUAL) via ~/.bashrc.
-#
-# Dropped vs. the Kubuntu version (no Termux/aarch64 path — see chat history):
-#   firefox (already installed via pkg), thunderbird (not needed),
-#   duckstation, claude-desktop, rustdesk, and the systemd NFS mounts.
+#   JellyTerm, qBittorrent TUI (+ Motion Cues / fresh-editor / bottom where the
+#   platform supports them).
 #
 # This script does NOT copy keys, tokens, logins, or config secrets.
 # After running it you still need to provide, yourself:
@@ -36,38 +34,55 @@
 #
 # Safe to re-run: every step checks whether the work is already done.
 #
+# NOTE: on Termux invoke as `bash setup-kde.sh` (bootstrap.sh does this) — the
+# #!/usr/bin/env shebang has no /usr/bin/env to resolve there.
+#
 set -euo pipefail
 
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"  # this repo (ships the qbt icon)
-PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"        # Termux prefix (user-owned)
+
+# ---------------------------------------------------------------------------
+# Platform profile (auto-detected; override with PLATFORM=linux|termux)
+# ---------------------------------------------------------------------------
+if [ -z "${PLATFORM:-}" ]; then
+  if [ -n "${TERMUX_VERSION:-}" ] || [ -d /data/data/com.termux ]; then
+    PLATFORM=termux
+  else
+    PLATFORM=linux
+  fi
+fi
+PLATFORM_LIB="$SCRIPT_DIR/lib/platform-$PLATFORM.sh"
+[ -r "$PLATFORM_LIB" ] || {
+  echo "setup-kde.sh: no platform profile for '$PLATFORM' (expected $PLATFORM_LIB)" >&2
+  exit 1
+}
+# shellcheck source=/dev/null
+. "$PLATFORM_LIB"   # defines BIN_DIR, SUDO, BASH_SHEBANG, FRESH_PATH and the p_* hooks
+
+# ---------------------------------------------------------------------------
+# Shared config (the "what/where"; the profile decides the "how")
+# ---------------------------------------------------------------------------
 # Two repo roots, split by ownership (not by build system):
-#   BUILD_DIR     — third-party upstream repos (hey-cli, qbittorrent-tui, fresh)
+#   BUILD_DIR     — third-party upstream repos (hey-cli, qbittorrent-tui, newsboat)
 #   WORKSPACE_DIR — your own (huntergdavis) projects (ortop, media, dunkingbird, jellyterm)
 BUILD_DIR="${BUILD_DIR:-$HOME/src}"
 WORKSPACE_DIR="${WORKSPACE_DIR:-$HOME/workspace}"
-# The one place binaries live. On Termux this is $PREFIX/bin (user-writable, no
-# sudo). Built artifacts stay in their repo and are symlinked in here, so a
-# rebuild is picked up with no stale copy.
-BIN_DIR="$PREFIX/bin"
 APPS_DIR="$HOME/.local/share/applications"   # XDG per-user menu entries (not binaries)
-CARGO_ROOT="$BUILD_DIR/cargo"                # where `cargo install` lands (then symlinked)
+CARGO_ROOT="$BUILD_DIR/cargo"                 # where `cargo install` lands (then symlinked)
 
 HEY_REPO="https://github.com/basecamp/hey-cli.git"
 ORTOP_REPO="https://github.com/huntergdavis/openrouter-tui.git"
 ORTOP_DIR="$WORKSPACE_DIR/ortop"   # your project, lives alongside media/dunkingbird
+NEWSBOAT_REPO="https://github.com/newsboat/newsboat.git"
 QBT_TUI_REPO="https://github.com/nickvanw/qbittorrent-tui.git"   # public
 MEDIA_REPO="git@github.com:huntergdavis/media.git"   # private; needs your GitHub SSH key
 MEDIA_DIR="$WORKSPACE_DIR/media"
 DUNKING_REPO="https://github.com/huntergdavis/dunkingbird.git"   # public
 DUNKING_DIR="$WORKSPACE_DIR/dunkingbird"
+MOTION_CUES_REPO="https://github.com/monperrus/motion-cues.git"   # public, third-party (Linux only)
+MOTION_CUES_DIR="$BUILD_DIR/motion-cues"
 JELLYTERM_REPO="https://github.com/huntergdavis/jellyterm.git"   # public
 JELLYTERM_DIR="$WORKSPACE_DIR/jellyterm"
-
-# Path of the fresh-editor binary (installed by the fresh-editor Termux package).
-FRESH_BIN="$BIN_DIR/fresh"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -77,14 +92,16 @@ info() { printf '    %s\n' "$*"; }
 warn() { printf '\033[1;33m    !! %s\033[0m\n' "$*"; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
-# Symlink a built binary into BIN_DIR. -f replaces a prior copy/symlink; -n
-# avoids descending into an existing symlinked dir. No sudo: $PREFIX/bin is ours.
+# Symlink a built binary into BIN_DIR. -f replaces a prior copy/symlink (so an
+# old `install`-ed file migrates to a symlink); -n avoids descending into an
+# existing symlinked dir. $SUDO is empty on Termux ($PREFIX/bin is user-owned)
+# and "sudo" on Linux (/usr/local/bin needs root).
 link_bin() {
   local src="$1" name="${2:-$(basename "$1")}"
-  ln -sfn "$src" "$BIN_DIR/$name"
+  $SUDO ln -sfn "$src" "$BIN_DIR/$name"
 }
 
-# Clone if missing, otherwise pull latest. Echoes the repo dir.
+# Clone if missing, otherwise pull latest.
 clone_or_update() {
   local url="$1" dir="$2"
   if [ -d "$dir/.git" ]; then
@@ -96,41 +113,20 @@ clone_or_update() {
   fi
 }
 
-mkdir -p "$BUILD_DIR" "$WORKSPACE_DIR" "$APPS_DIR"   # BIN_DIR ($PREFIX/bin) already exists
-
-# ---------------------------------------------------------------------------
-# 1. Build dependencies + toolchains (Termux pkg/apt, no sudo)
-# ---------------------------------------------------------------------------
-# We use `apt-get install` (NOT `pkg upgrade`) so we only pull the named build
-# deps and never bump the version-pinned KDE (kf6/qt6) libraries. rust+cargo and
-# clang are already installed; golang/go is not, so the toolchain list adds it.
-install_build_deps() {
-  say "Installing build toolchains and dependencies (Termux pkg/apt)"
-  apt-get update -y 2>/dev/null || apt-get update || warn "apt-get update reported an error; continuing"
-
-  # Package-name notes for Termux (differ from Ubuntu):
-  #   golang            (was golang-go)   — provides `go`
-  #   rust              already installed — provides cargo/rustc (no rustup on Termux)
-  #   stfl              (was libstfl-dev) — newsboat TUI lib; headers bundled
-  #   libsqlite/libcurl/ncurses/libxml2/json-c/dbus — dev headers ship in the
-  #                     main package (Termux has no -dev split)
-  #   xdotool/xclip     from the (already-enabled) x11-repo
-  #   konsole/snapd     omitted: konsole is pre-installed & pinned; no snap on Termux
-  #   ydotool           NOT packaged for Termux (see Dunking Bird note below)
-  apt-get install -y \
-    build-essential clang make binutils pkg-config git curl \
-    golang rust gettext asciidoctor ruby \
-    stfl libsqlite libcurl ncurses libxml2 dbus json-c \
-    python python-pip mpv \
-    xdotool xclip \
-    || warn "some build deps failed to install; later source builds may fail"
-
-  have go    || warn "go not on PATH after install — hey/ortop/qbt-tui builds will fail"
-  have cargo || warn "cargo not on PATH — fresh-editor/bottom builds will fail"
+# Write an executable launcher to $1 with the platform's shebang, reading the
+# script body from stdin (heredoc). Quoted heredocs keep the body literal;
+# unquoted ones let $FRESH_PATH etc. expand at write time. $SUDO handles the
+# Linux /usr/local/bin permissions; it's empty on Termux.
+write_launcher() {
+  local dest="$1"
+  { printf '%s\n' "$BASH_SHEBANG"; cat; } | $SUDO tee "$dest" >/dev/null
+  $SUDO chmod 0755 "$dest"
 }
 
+mkdir -p "$BUILD_DIR" "$WORKSPACE_DIR" "$APPS_DIR"   # BIN_DIR already exists on both platforms
+
 # ---------------------------------------------------------------------------
-# 2. Source builds: hey, ortop, qbt-tui (newsboat is a Termux package)
+# Source builds shared by both platforms: hey, ortop, qbt-tui
 # ---------------------------------------------------------------------------
 build_hey() {
   say "Building HEY (hey-cli) -> $BIN_DIR/hey"
@@ -160,22 +156,6 @@ build_qbt_tui() {
   clone_or_update "$QBT_TUI_REPO" "$dir"
   ( cd "$dir" && go build -o qbt-tui ./cmd/qbt-tui )
   link_bin "$dir/qbt-tui" qbt-tui
-}
-
-build_newsboat() {
-  say "Installing Newsboat -> $BIN_DIR/newsboat"
-  # Unlike the Kubuntu build, we do NOT build newsboat from source on Termux: its
-  # gettext-sys crate can't find a usable system libintl and falls back to an
-  # autotools build of vendored gettext that is glacially slow and ultimately
-  # fails on Android. Termux packages newsboat (2.43+) directly, so just install
-  # that — it's the same upstream, already cross-compiled for aarch64.
-  if have newsboat; then
-    info "newsboat already installed ($(newsboat --version 2>/dev/null | head -1))"
-  elif apt-get install -y newsboat; then
-    info "newsboat installed from the Termux package"
-  else
-    warn "could not install the newsboat package; skipping"
-  fi
 }
 
 # Media Editor: a personal Textual TUI for editing markdown collection tables.
@@ -218,11 +198,9 @@ install_media() {
 
 # Dunking Bird: a personal Textual/curses TUI that types a prompt into the
 # active window every X seconds (drives input via ydotool). Public repo.
-#
-# TERMUX NOTE: ydotool is NOT packaged for Termux, and its uinput backend needs
-# root/kernel access an unprivileged Android app doesn't have — so the auto-type
-# feature won't function natively here. We still install the TUI + xdotool/xclip
-# (which the launcher's prereq checks look for) and warn about ydotool.
+# The platform hook p_dunkingbird_input handles the input backend (the `input`
+# group on Linux; a "no ydotool on Android" warning on Termux). kdotool (KDE
+# Wayland window targeting) is built the same way on both platforms.
 install_dunkingbird() {
   say "Installing Dunking Bird (dunkingbird) -> $DUNKING_DIR"
   clone_or_update "$DUNKING_REPO" "$DUNKING_DIR"
@@ -241,11 +219,11 @@ install_dunkingbird() {
     fi
   fi
 
-  have ydotool || warn "ydotool is unavailable on Termux (no uinput without root) — Dunking Bird's auto-type will not work"
+  p_dunkingbird_input   # input group (Linux) / ydotool-unavailable warning (Termux)
 
   # kdotool: window capture/focus backend used on KDE Wayland (best-effort).
-  # Build it into a cargo root under BUILD_DIR and symlink the binary into
-  # BIN_DIR like everything else. Skipped unless this is a Wayland session.
+  # cargo can't write to /usr/local/bin without sudo, so build it into a cargo
+  # root under BUILD_DIR and symlink the binary into BIN_DIR like everything else.
   if [ "${XDG_SESSION_TYPE:-}" = "wayland" ] && ! have kdotool; then
     info "installing kdotool (KDE Wayland window backend)"
     if cargo install --git https://github.com/jinliu/kdotool --root "$CARGO_ROOT"; then
@@ -257,148 +235,39 @@ install_dunkingbird() {
 }
 
 # JellyTerm: a terminal Jellyfin browser/player. Its own installer manages the
-# Python venv; mpv (the player) is already installed in the build-deps step.
-#
-# TERMUX NOTES:
-#   - The repo's scripts use `#!/usr/bin/env bash`, but Termux has no /usr/bin/env
-#     (it's $PREFIX/bin/env), so a direct `./scripts/install.sh` fails with
-#     "bad interpreter". termux-fix-shebang rewrites them to the $PREFIX path;
-#     we also invoke the installer through `bash` so it runs regardless.
-#   - We pass --skip-system-packages: the installer's OS-package path uses sudo
-#     (absent on Termux) and we already have mpv, so the venv is all we need.
+# Python venv and OS player prerequisites. The platform hook p_jellyterm_install
+# runs that installer the platform's way (Termux needs shebang fixups + bash +
+# --skip-system-packages because the OS-package path uses sudo).
 install_jellyterm() {
   say "Installing JellyTerm (jellyterm) -> $JELLYTERM_DIR"
   clone_or_update "$JELLYTERM_REPO" "$JELLYTERM_DIR"
   chmod 0755 "$JELLYTERM_DIR/scripts/install.sh" "$JELLYTERM_DIR/scripts/run.sh" 2>/dev/null || true
-  # Rewrite the upstream `#!/usr/bin/env bash` shebangs for Termux so run.sh
-  # (invoked later by the PATH wrapper and the menu icon) execs directly.
-  have termux-fix-shebang && termux-fix-shebang "$JELLYTERM_DIR/scripts/"*.sh 2>/dev/null || true
-
-  if [ -f "$JELLYTERM_DIR/scripts/install.sh" ]; then
-    ( cd "$JELLYTERM_DIR" && bash ./scripts/install.sh --yes --skip-system-packages --player mpv-terminal ) \
-      || warn "JellyTerm installer reported an error; check it manually"
-  else
-    warn "skipping JellyTerm install (installer not present at $JELLYTERM_DIR/scripts/install.sh)"
-  fi
+  p_jellyterm_install "$JELLYTERM_DIR"
 }
 
 # ---------------------------------------------------------------------------
-# 3. Replacements for the old snaps: fresh-editor, bottom
-# ---------------------------------------------------------------------------
-# Snap doesn't exist on Termux (no systemd, no root, squashfs can't be mounted).
-# fresh-editor is packaged for Termux, so we install that. bottom isn't, so it's
-# built from source. firefox (already installed via pkg), thunderbird, and
-# duckstation are intentionally not handled here.
-#
-# fresh-editor: do NOT build from source on Termux. The upstream (sinelaw/fresh)
-# pulls several deps that exclude target_os="android" (trash, arboard) plus an
-# embedded JS runtime (rquickjs-sys needs bindgen for aarch64), and the release
-# profile's fat LTO OOMs rustc on a phone. Termux packages fresh-editor at the
-# same version (0.4.1), already cross-compiled for aarch64 — just install it.
-build_fresh_editor() {
-  say "Installing fresh-editor -> $FRESH_BIN"
-  if have fresh; then
-    info "fresh already installed ($(fresh --version 2>/dev/null | head -1))"
-  elif apt-get install -y fresh-editor; then
-    info "fresh-editor installed from the Termux package"
-  else
-    warn "could not install the fresh-editor package; EDITOR will fall back to vim/nano"
-  fi
-}
-
-build_bottom() {
-  say "Building bottom (btm) -> $BIN_DIR/btm"
-  # `bottom` is the crate; its binary is `btm`. Build into the shared cargo root
-  # and symlink like everything else.
-  #
-  # --no-default-features is REQUIRED on Termux: bottom's default "deploy" feature
-  # pulls in `battery` -> starship-battery, which has no Android target and fails
-  # with `compile_error!("Support for this target OS is not implemented yet!")`.
-  # Dropping it also drops the (irrelevant here) nvidia/zfs features. btm still
-  # builds and runs fine; only the battery widget is gone.
-  if cargo install bottom --no-default-features --root "$CARGO_ROOT"; then
-    link_bin "$CARGO_ROOT/bin/btm" btm
-    info "bottom -> $BIN_DIR/btm"
-  else
-    warn "cargo install bottom failed; skipping"
-  fi
-}
-
-# ---------------------------------------------------------------------------
-# 3b. Make fresh-editor the default editor
-# ---------------------------------------------------------------------------
-# On Termux there's no snap argv[0] dispatch problem (fresh is a real binary) and
-# no /etc/environment / pam_env. We set EDITOR/VISUAL in ~/.bashrc (sourced by
-# interactive shells, including the konsole sessions the menu icons spawn).
-# Idempotent: a marked block is rewritten in place. Falls back to vim/nano if
-# the fresh build didn't produce a binary.
-set_default_editor() {
-  say "Making fresh-editor the default editor (via ~/.bashrc)"
-
-  local editor="$FRESH_BIN"
-  if [ ! -x "$FRESH_BIN" ]; then
-    editor="$(command -v vim || command -v nano || echo "$FRESH_BIN")"
-    warn "fresh not built; defaulting EDITOR to $editor"
-  fi
-
-  local rc="$HOME/.bashrc"
-  touch "$rc"
-  # Strip any previous block we wrote, then append a fresh one.
-  if grep -q '# >>> setup-kde editor >>>' "$rc"; then
-    sed -i '/# >>> setup-kde editor >>>/,/# <<< setup-kde editor <<</d' "$rc"
-  fi
-  {
-    echo '# >>> setup-kde editor >>>'
-    printf 'export EDITOR="%s"\n' "$editor"
-    printf 'export VISUAL="%s"\n' "$editor"
-    echo '# <<< setup-kde editor <<<'
-  } >> "$rc"
-  info "EDITOR/VISUAL -> $editor (takes effect in new shells)"
-}
-
-# ---------------------------------------------------------------------------
-# 4. Tailscale
-# ---------------------------------------------------------------------------
-# NOTE: Tailscale is NOT in the Termux repos (checked main, x11, glibc, TUR), and
-# there's no systemd to run tailscaled as a service. We attempt the package in
-# case a repo adds it later; otherwise we point at the official Android app.
-install_tailscale() {
-  say "Installing Tailscale"
-  if have tailscale; then info "tailscale already installed"; return; fi
-  if apt-get install -y tailscale 2>/dev/null; then
-    info "tailscale installed — run it manually:  tailscaled &   then:  tailscale up"
-  else
-    warn "tailscale is not packaged for Termux. Use the official Tailscale Android app instead:"
-    warn "  https://play.google.com/store/apps/details?id=com.tailscale.ipn"
-  fi
-}
-
-# ---------------------------------------------------------------------------
-# 5. Wrapper scripts (recreated verbatim, Termux paths)
+# Launcher wrapper scripts (shared; platform shebang via write_launcher)
 # ---------------------------------------------------------------------------
 install_wrappers() {
   say "Installing launcher wrapper scripts -> $BIN_DIR"
 
-  tee "$BIN_DIR/hey-journal" >/dev/null <<EOF
-#!/data/data/com.termux/files/usr/bin/bash
+  write_launcher "$BIN_DIR/hey-journal" <<EOF
 # Launcher wrapper for the "HEY Journal" KDE menu entry.
 # \`hey journal write\` opens \$EDITOR; GUI launches don't always have it set,
 # so guarantee fresh-editor is used (falls back to any EDITOR already set).
-export EDITOR="\${EDITOR:-$FRESH_BIN}"
+export EDITOR="\${EDITOR:-$FRESH_PATH}"
 export VISUAL="\${VISUAL:-\$EDITOR}"
 exec hey journal write "\$@"
 EOF
 
-  tee "$BIN_DIR/ortop-gui" >/dev/null <<'EOF'
-#!/data/data/com.termux/files/usr/bin/bash
+  write_launcher "$BIN_DIR/ortop-gui" <<'EOF'
 # Launcher wrapper for the ortop KDE menu entry.
 # GUI launches don't source ~/.bashrc, so load the OpenRouter keys explicitly.
 . "$HOME/.config/ortop/env" 2>/dev/null
 exec ortop "$@"
 EOF
 
-  tee "$BIN_DIR/qbt-tui-gui" >/dev/null <<'EOF'
-#!/data/data/com.termux/files/usr/bin/bash
+  write_launcher "$BIN_DIR/qbt-tui-gui" <<'EOF'
 # Launcher wrapper for the qbt-tui KDE menu entry.
 # GUI launches don't source ~/.bashrc, so set the (non-secret) server URL here
 # and load the qBittorrent WebUI credentials from a separate env file.
@@ -408,18 +277,15 @@ exec qbt-tui "$@"
 EOF
 
   if [ -f "$JELLYTERM_DIR/scripts/run.sh" ]; then
-    tee "$BIN_DIR/jellyterm" >/dev/null <<EOF
-#!/data/data/com.termux/files/usr/bin/bash
+    write_launcher "$BIN_DIR/jellyterm" <<EOF
 # Launcher wrapper for JellyTerm. Keep this as a wrapper, not a symlink to
 # scripts/run.sh, so the project root stays stable when invoked from PATH.
 exec "$JELLYTERM_DIR/scripts/run.sh" "\$@"
 EOF
-    chmod 0755 "$BIN_DIR/jellyterm"
   else
     warn "skipping JellyTerm PATH wrapper (runner not present at $JELLYTERM_DIR/scripts/run.sh)"
   fi
 
-  chmod 0755 "$BIN_DIR/hey-journal" "$BIN_DIR/ortop-gui" "$BIN_DIR/qbt-tui-gui"
   if [ ! -f "$HOME/.config/ortop/env" ]; then
     warn "ortop needs ~/.config/ortop/env with your OpenRouter keys (not created by this script)"
   fi
@@ -441,7 +307,9 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# 6. KDE menu icons (.desktop entries)
+# KDE menu icons (.desktop entries) — shared; every optional app self-gates on
+# whether its repo/binary actually installed, so the Motion Cues entry (Linux
+# only) simply never appears on Termux.
 # ---------------------------------------------------------------------------
 install_desktop_entries() {
   say "Creating KDE menu icons -> $APPS_DIR"
@@ -530,7 +398,7 @@ EOF
 
   chmod 0644 "$APPS_DIR"/{hey,hey-journal,newsboat,ortop,qbt-tui}.desktop
 
-  # JellyTerm — launches through the $PREFIX/bin wrapper so it is also on PATH.
+  # JellyTerm — launches through the BIN_DIR wrapper so it is also on PATH.
   if [ -f "$JELLYTERM_DIR/scripts/run.sh" ]; then
     cat > "$APPS_DIR/jellyterm.desktop" <<EOF
 [Desktop Entry]
@@ -594,6 +462,28 @@ EOF
     warn "skipping Dunking Bird menu icon (repo not present at $DUNKING_DIR)"
   fi
 
+  # Motion Cues — a PyQt6 system-tray GUI (Linux only; Termux has no PyQt6 wheel,
+  # so the venv binary never exists there and this block is skipped). Launches
+  # directly with no terminal.
+  if [ -x "$MOTION_CUES_DIR/venv/bin/motion-cues" ]; then
+    cat > "$APPS_DIR/motion-cues.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Motion Cues
+GenericName=Vehicle Motion Cues
+Comment=Peripheral dots that reduce motion sickness using a laptop in a vehicle
+Exec=$BIN_DIR/motion-cues
+Icon=preferences-desktop-display
+Terminal=false
+Categories=Utility;Accessibility;
+Keywords=motion;cues;sickness;vehicle;car;dots;overlay;
+StartupNotify=false
+EOF
+    chmod 0644 "$APPS_DIR/motion-cues.desktop"
+  else
+    warn "skipping Motion Cues menu icon (motion-cues not installed)"
+  fi
 
   if have update-desktop-database; then
     update-desktop-database "$APPS_DIR" 2>/dev/null || true
@@ -601,10 +491,10 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# 0. Migrate off the old split layout (~/.local/bin, ~/src/openrouter-tui)
+# Migrate off the old split layout (~/.local/bin, ~/src/openrouter-tui)
 # ---------------------------------------------------------------------------
 # Earlier versions installed some binaries to ~/.local/bin and cloned ortop to
-# ~/src/openrouter-tui. ~/.local/bin can sit *ahead* of $PREFIX/bin on PATH, so a
+# ~/src/openrouter-tui. ~/.local/bin can sit *ahead* of BIN_DIR on PATH, so a
 # leftover copy there would shadow the new symlink — remove them.
 cleanup_legacy_layout() {
   say "Cleaning up legacy ~/.local/bin and old ortop clone"
@@ -625,48 +515,28 @@ cleanup_legacy_layout() {
 # Run
 # ---------------------------------------------------------------------------
 main() {
-  install_build_deps
+  p_build_deps            # platform: apt+rustup (Linux) / pkg (Termux)
   cleanup_legacy_layout
 
   build_hey
   build_ortop
   build_qbt_tui
-  build_newsboat
+  p_newsboat              # platform: source build (Linux) / Termux package
   install_media
   install_dunkingbird
   install_jellyterm
 
-  build_fresh_editor
-  build_bottom
-  set_default_editor
-  install_tailscale
+  p_fresh_editor          # platform: snap (Linux) / Termux package
+  p_extra_apps            # platform: snaps+duckstation+claude-desktop+rustdesk+motion-cues (Linux) / bottom (Termux)
+  p_default_editor        # platform: /etc/environment + alternatives (Linux) / ~/.bashrc (Termux)
+  p_vpn                   # platform: tailscale install (Linux) / package-or-Android-app note (Termux)
 
   install_wrappers
   install_desktop_entries
+  p_mounts                # platform: systemd NFS automounts (Linux) / no-op (Termux)
 
   say "Done."
-  cat <<EOF
-
-Menu icons created: HEY, HEY Journal, Newsboat, ortop, Media Editor, Dunking Bird,
-JellyTerm, qBittorrent TUI.
-Binaries live in $BIN_DIR (Termux \$PREFIX/bin) — no sudo, no /usr/local/bin.
-fresh-editor installed from the Termux package; bottom (btm) built from source.
-fresh-editor is now the default editor (open a new shell, or: source ~/.bashrc).
-
-Termux differences from the Kubuntu build:
-  - Dropped (no Termux/aarch64 path): firefox (already installed), thunderbird,
-    duckstation, claude-desktop, rustdesk, and the systemd NFS mounts.
-  - Tailscale isn't packaged for Termux — use the official Android app.
-  - Dunking Bird's auto-type needs ydotool, which can't run without root here.
-
-Still up to you (secrets — intentionally not handled here):
-  - ~/.config/ortop/env   OpenRouter API keys
-  - ~/.config/qbt-tui/env qBittorrent WebUI username+password (or api_key)
-  - HEY login             run: hey   (and sign in)
-  - Jellyfin login        run: jellyterm   (and sign in)
-  - ~/.config/newsboat/urls   your FreshRSS endpoint + credentials
-  - GitHub SSH key        needed to clone the private media repo
-EOF
+  p_final_notes
 }
 
 main "$@"
